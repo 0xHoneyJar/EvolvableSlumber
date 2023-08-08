@@ -20,8 +20,13 @@ enum StakingType {
     NONE, CURRENT, ALIVE, CUMULATIVE
 }
 
+// TODO How do I automatically stake on mint without breaking 721A?
+// TODO How do I automatically stake on tx without blaoting the UX?
+//      This second one is easier.
 struct StakingConfig {
-    uint24 
+    uint32 minStakingTime;
+    uint32 automaticStakeTimeOnMint;
+    uint32 automaticStakeTimeOnTx;
 }
 
 /**
@@ -33,6 +38,11 @@ struct StakingConfig {
  */
 struct StakeTokenInfo {
     bool isStaked;
+    // TODO Slightly redundant state: \[
+    //    totalTimeStaked = 0 \implies
+    //        firstTimeStaked = lastTimeStaked
+    // /]
+    // TODO ERC721A Holds info about the timestamp a token was staked.
     uint32 firstTimeStaked;
     uint32 totalTimeStaked;
     uint32 lastTimeStaked;
@@ -40,7 +50,7 @@ struct StakeTokenInfo {
 
 struct EvolutionConfig {
     StakingType evolutionStakeStrategy;
-    address evolutionStrategy;
+    address evolutionResolverStrategy;
 }
 
 struct RewardsConfig {
@@ -54,11 +64,13 @@ struct GeneralConfig {
 
 contract ImmutableEvolutionArchetype is ERC721A, Ownable {
 
+    StakingConfig private _stakingConfig;
     mapping (uint256 => StakeTokenInfo) private _tokenIdToStakeInfo;
 
     EvolutionConfig private _evolutionConfig;
     RewardsConfig private _rewardsConfig;
     GeneralConfig private _config;
+
     bool private _initialized;
 
     constructor(
@@ -67,61 +79,77 @@ contract ImmutableEvolutionArchetype is ERC721A, Ownable {
     ) ERC721A(name, ticker) {}
     
     function initialize(
+        StakingConfig memory stakingConfig,
         EvolutionConfig memory evolutionConfig,
         RewardsConfig memory rewardsConfig,
         GeneralConfig memory config 
     ) public onlyOwner {
+        require(!_initialized);
+
+        _stakingConfig = stakingConfig;
         _evolutionConfig = evolutionConfig;
         _rewardsConfig = rewardsConfig;
         _config = config;
+
         _initialized = true;
     }
 
     function mint(uint16 quantity) external payable {
         require(msg.value >= _config.price * quantity);
+
+        if (_stakingConfig.automaticStakeTimeOnMint > 0) {
+            _setExtraDataAt(_nextTokenId(), 1);     
+        }
+
         _mint(msg.sender, quantity);
+    }
+
+    function getTokenStakedOnMint(uint256 tokenId) public view returns (bool, uint24) {
+        return (_ownershipOf(tokenId).extraData == 1, _ownershipOf(tokenId).extraData);
     }
 
     function stake(uint256 tokenId) public {
         require(ownerOf(tokenId) == msg.sender);
-        StakeTokenInfo memory stake = _tokenIdToStakeInfo[tokenId];
-        require(!stake.isStaked);
+        StakeTokenInfo memory currentStake = _tokenIdToStakeInfo[tokenId];
+        require(!currentStake.isStaked);
         uint32 currentTime = uint32(block.timestamp);
 
-        if (stake.firstTimeStaked == 0) stake.firstTimeStaked = currentTime;
-        stake.lastTimeStaked = currentTime;
+        if (currentStake.firstTimeStaked == 0) currentStake.firstTimeStaked = currentTime;
+        currentStake.lastTimeStaked = currentTime;
 
-        stake.isStaked = true;
-        _tokenIdToStakeInfo[tokenId] = stake;
+        currentStake.isStaked = true;
+        _tokenIdToStakeInfo[tokenId] = currentStake;
     }
 
     function unstake(uint256 tokenId) public {
         require(ownerOf(tokenId) == msg.sender);
-        StakeTokenInfo memory stake = _tokenIdToStakeInfo[tokenId];
-        require(stake.isStaked);
+        StakeTokenInfo memory currentStake = _tokenIdToStakeInfo[tokenId];
+        require(currentStake.isStaked);
 
-        stake.totalTimeStaked += uint32(block.timestamp) - stake.lastTimeStaked;
+        currentStake.totalTimeStaked += uint32(block.timestamp) - currentStake.lastTimeStaked;
 
-        stake.isStaked = false;
-        _tokenIdToStakeInfo[tokenId] = stake;
+        currentStake.isStaked = false;
+        _tokenIdToStakeInfo[tokenId] = currentStake;
     }
 
     function getStake(
         uint256 tokenId, StakingType strategy
     ) public view returns (uint256) {
-        StakeTokenInfo memory stake = _tokenIdToStakeInfo[tokenId];
+        StakeTokenInfo memory currentStake = _tokenIdToStakeInfo[tokenId];
         if (strategy == StakingType.CURRENT) 
-            return block.timestamp - stake.lastTimeStaked;
+            return block.timestamp - currentStake.lastTimeStaked;
         if (strategy == StakingType.ALIVE) 
-            return block.timestamp - stake.firstTimeStaked;
+            return block.timestamp - currentStake.firstTimeStaked;
         if (strategy == StakingType.CUMULATIVE) 
-            return (block.timestamp - stake.lastTimeStaked) + stake.totalTimeStaked;
+            return (block.timestamp - currentStake.lastTimeStaked) + currentStake.totalTimeStaked;
         return 0;
     }
     
     function getEvolution(uint256 tokenId) public view returns (uint256) {
-        uint256 stake = getStake(tokenId, _evolutionConfig.evolutionStakeStrategy);
-        return IEvolutionStrategy(_evolutionConfig.evolutionStrategy).getEvolution(stake);
+        uint256 currentStake = getStake(tokenId, _evolutionConfig.evolutionStakeStrategy);
+        return IEvolutionStrategy(
+            _evolutionConfig.evolutionResolverStrategy
+        ).getEvolution(currentStake);
     }
 
     function tokenURI(uint256 tokenId) 
