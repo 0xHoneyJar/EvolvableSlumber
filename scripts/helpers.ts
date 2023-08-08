@@ -5,18 +5,20 @@ import { EvolutionConfigStruct, GeneralConfigStruct, RewardsConfigStruct, Stakin
 //    NONE, CURRENT, ALIVE, CUMULATIVE
 //}
 
-type StakingType = 'NONE'
-                 | 'CURRENT'
-                 | 'ALIVE'
-                 | 'CUMULATVE'
-
-const adaptStakingTypeToContract = (t: StakingType) => {
-    return ethers.BigNumber.from(t)
+enum StakingType {
+    NONE,
+    CURRENT,
+    ALIVE,
+    CUMULATVE
 }
 
-export class ImmutableEvolutionArchetypeBuilder {
+const adaptStakingTypeToContract = (t: StakingType) => {
+    return ethers.BigNumber.from(t as number)
+}
+
+export class ImmutableEvolutionContractBuilder {
     
-    // Default contract state
+    // Default contract state (TODO)
     name = 'Test'
     ticker = 'TEST'
 
@@ -28,11 +30,11 @@ export class ImmutableEvolutionArchetypeBuilder {
 
     evolutionConf: EvolutionConfigStruct = {
         evolutionResolverStrategy: ethers.constants.AddressZero,
-        evolutionStakeStrategy: adaptStakingTypeToContract('NONE'),
+        evolutionStakeStrategy: adaptStakingTypeToContract(StakingType.NONE),
     }
 
     rewardsConf: RewardsConfigStruct = {
-        rewardsTakeStrategy: adaptStakingTypeToContract('NONE')
+        rewardsTakeStrategy: adaptStakingTypeToContract(StakingType.NONE)
     }
 
     generalConf: GeneralConfigStruct = {
@@ -41,13 +43,29 @@ export class ImmutableEvolutionArchetypeBuilder {
     }
 
     // Builder setters
-    setStakingConf({
-        automaticStakeTimeOnMint,
-        automaticStakeTimeOnTx,
-        minStakingTime
-    }: Partial<StakingConfigStruct>) {
-        if (automaticStakeTimeOnTx)
-            this.stakingConf.automaticStakeTimeOnTx = automaticStakeTimeOnTx
+    setName(name: string, ticker: string) {
+        this.name = name
+        this.ticker = ticker
+        return this
+    }
+
+    setStakingConf(args: Partial<StakingConfigStruct>) {
+        this.stakingConf = { ...this.stakingConf, ...args }
+        return this
+    }
+
+    setEvolutionConf(args: Partial<EvolutionConfigStruct>) {
+        this.evolutionConf = { ...this.evolutionConf, ...args }
+        return this
+    }
+
+    setRewardsConf(args: Partial<EvolutionConfigStruct>) {
+        this.rewardsConf = { ...this.rewardsConf, ...args }
+        return this
+    }
+
+    setGeneralConf(args: Partial<GeneralConfigStruct>) {
+        this.generalConf = { ...this.generalConf, ...args }
         return this
     }
 

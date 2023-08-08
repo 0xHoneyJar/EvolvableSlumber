@@ -97,15 +97,15 @@ contract ImmutableEvolutionArchetype is ERC721A, Ownable {
     function mint(uint16 quantity) external payable {
         require(msg.value >= _config.price * quantity);
 
-        if (_stakingConfig.automaticStakeTimeOnMint > 0) {
-            _setExtraDataAt(_nextTokenId(), 1);     
-        }
-
+        uint256 fstNextId = _nextTokenId();
         _mint(msg.sender, quantity);
+        if (_stakingConfig.automaticStakeTimeOnMint > 0)
+            _setExtraDataAt(fstNextId, 1);
+
     }
 
-    function getTokenStakedOnMint(uint256 tokenId) public view returns (bool, uint24) {
-        return (_ownershipOf(tokenId).extraData == 1, _ownershipOf(tokenId).extraData);
+    function getTokenStakedOnMint(uint256 tokenId) public view returns (bool) {
+        return _ownershipOf(tokenId).extraData == 1;
     }
 
     function stake(uint256 tokenId) public {
