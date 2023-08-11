@@ -10,11 +10,7 @@ describe('ImmutableEvolutionArchetype', () => {
             .build()
         
         const minter = await getRandomFundedAccount()
-        await nft.connect(minter).mint(20)
-        console.log(await nft.getTokenStakedOnMint(0))
-        //console.log(await nft.getTokenStakedOnMint(1))
-        console.log(await nft.getTokenStakedOnMint(19))
-        //expect().true
-        assert(true)
+        await nft.connect(minter).mint(1)
+        expect(await nft.getTokenStakedOnMint(1)).true
     })
 })

@@ -11,7 +11,7 @@ import "solady/src/utils/LibString.sol";
 /**
  * NONE: Staking disabled.
  * CURRENT: Stake linear to the time the token was last time staked.
- * ALIVE: Stake linear to the time the token was staked for the first time.
+ * ALIVE: Stake linear to the time the token was minted.
  * CUMULATIVE: Stake linear to the sum of all staking times. E.g, if you staked
  * for 3 days, unstaked, and restaked for another day, the total stake will
  * be linearly proportional to 4.
@@ -37,15 +37,10 @@ struct StakingConfig {
  * Because this value is dynamic and depends on the chain state.
  */
 struct StakeTokenInfo {
-    bool isStaked;
-    // TODO Slightly redundant state: \[
-    //    totalTimeStaked = 0 \implies
-    //        firstTimeStaked = lastTimeStaked
-    // /]
-    // TODO ERC721A Holds info about the timestamp a token was staked.
-    uint32 firstTimeStaked;
-    uint32 totalTimeStaked;
+    // NOTE That the token could get automatically staked on mint,
+    // then this variable will be set 
     uint32 lastTimeStaked;
+    uint32 totalTimeStaked;
 }
 
 struct EvolutionConfig {
@@ -99,37 +94,62 @@ contract ImmutableEvolutionArchetype is ERC721A, Ownable {
 
         uint256 fstNextId = _nextTokenId();
         _mint(msg.sender, quantity);
+
+        // If tokens should get staked automatically on mint,
+        // set a flag so the contract knows it happened.
         if (_stakingConfig.automaticStakeTimeOnMint > 0)
             _setExtraDataAt(fstNextId, 1);
-
     }
 
     function getTokenStakedOnMint(uint256 tokenId) public view returns (bool) {
         return _ownershipOf(tokenId).extraData == 1;
     }
 
+    function getMintTime(uint256 tokenId) public view returns (uint256) {
+        return _ownershipOf(tokenId).startTimestamp;
+    }
+
+    /**
+     * @notice Theres no `unstake` function, tokens get automatically unstaked
+     * when its time.
+     */
+    function getTokenIsCurrentlyStaked(uint256 tokenId) public view returns (bool) {
+        if (getTokenStakedOnMint(tokenId)) {
+            uint256 stakingEnd = getMintTime(tokenId) + _stakingConfig.automaticStakeTimeOnMint;
+            if (stakingEnd > block.timestamp) return true;
+        }
+
+        StakeTokenInfo memory currentStake = _tokenIdToStakeInfo[tokenId];
+        if (currentStake.lastTimeStaked > 0) {
+            uint256 stakingEnd = getMintTime(tokenId) + _stakingConfig.minStakingTime;
+            return stakingEnd > block.timestamp;
+        }
+
+        return false;
+    }
+
     function stake(uint256 tokenId) public {
         require(ownerOf(tokenId) == msg.sender);
+        require(!getTokenIsCurrentlyStaked(tokenId));
+
+        // NOTE All this code is terrible, but it works.
+        // TODO Learn more about ERC721A to see how can I batch all together.
         StakeTokenInfo memory currentStake = _tokenIdToStakeInfo[tokenId];
-        require(!currentStake.isStaked);
         uint32 currentTime = uint32(block.timestamp);
 
-        if (currentStake.firstTimeStaked == 0) currentStake.firstTimeStaked = currentTime;
         currentStake.lastTimeStaked = currentTime;
-
-        currentStake.isStaked = true;
         _tokenIdToStakeInfo[tokenId] = currentStake;
     }
 
-    function unstake(uint256 tokenId) public {
-        require(ownerOf(tokenId) == msg.sender);
-        StakeTokenInfo memory currentStake = _tokenIdToStakeInfo[tokenId];
-        require(currentStake.isStaked);
-
-        currentStake.totalTimeStaked += uint32(block.timestamp) - currentStake.lastTimeStaked;
-
-        currentStake.isStaked = false;
-        _tokenIdToStakeInfo[tokenId] = currentStake;
+    function _beforeTokenTransfers(
+        address from,
+        address to,
+        uint256 startTokenId,
+        uint256 quantity
+    ) internal virtual override {
+        // NOTE This will break because of `quantity`.
+        // TODO Learn more about ERC721A to see how can I batch all together.
+        require(!getTokenIsCurrentlyStaked(startTokenId));
     }
 
     function getStake(
@@ -139,7 +159,7 @@ contract ImmutableEvolutionArchetype is ERC721A, Ownable {
         if (strategy == StakingType.CURRENT) 
             return block.timestamp - currentStake.lastTimeStaked;
         if (strategy == StakingType.ALIVE) 
-            return block.timestamp - currentStake.firstTimeStaked;
+            return block.timestamp - getMintTime(tokenId);
         if (strategy == StakingType.CUMULATIVE) 
             return (block.timestamp - currentStake.lastTimeStaked) + currentStake.totalTimeStaked;
         return 0;
