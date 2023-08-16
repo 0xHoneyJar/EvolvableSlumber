@@ -29,18 +29,6 @@ struct Config {
     StakingConfig stakingConfig;
 }
 
-/**
- * @title StakeableArchetype
- *
- * @dev This contract implements a novel staking mechanism:
- * 
- * - Tokens can get automatically staked on mint for a certain amount of time.
- * - Tokens can get automatically staked on tx for a certain amount of time.
- * - If not, tokens can get manually staked by the user.
- *
- * In any of those cases, the user will be able to extend staking time, if not,
- * the token will get automatically unstaked to minimize contract interaction.
- */
 contract StakeableArchetype is ERC721A, Ownable {
 
     // TODO Overwrite 721A words.
