@@ -9,27 +9,42 @@ import "./interfaces/IEvolutionStrategy.sol";
 import "solady/src/utils/LibString.sol";
 import "solady/src/utils/SafeTransferLib.sol";
 
+
+//struct StakeTokenInfo {
+//    // `stakedTime == 0` iff the token has not been manually staked.
+//    uint32 stakedTimestamp;
+//    uint32 totalTimeStaked;
+//}
+
 struct StakingConfig {
     uint32 minStakingTime;
     uint32 automaticStakeTimeOnMint;
     uint32 automaticStakeTimeOnTx;
 }
 
-struct StakeTokenInfo {
-    // `stakedTime == 0` iff the token has not been manually staked.
-    uint32 stakedTimestamp;
-    uint32 totalTimeStaked;
-}
-
 struct Config {
-    uint256 price;
+    uint128 deployTime;
+    uint128 price;
     string baseUri;
     StakingConfig stakingConfig;
 }
 
+/**
+ * @title StakeableArchetype
+ *
+ * @dev This contract implements a novel staking mechanism:
+ * 
+ * - Tokens can get automatically staked on mint for a certain amount of time.
+ * - Tokens can get automatically staked on tx for a certain amount of time.
+ * - If not, tokens can get manually staked by the user.
+ *
+ * In any of those cases, the user will be able to extend staking time, if not,
+ * the token will get automatically unstaked to minimize contract interaction.
+ */
 contract StakeableArchetype is ERC721A, Ownable {
 
-    mapping (uint256 => StakeTokenInfo) private _tokenIdToStakeInfo;
+    // TODO Overwrite 721A words.
+    // mapping (uint256 => StakeTokenInfo) private _tokenIdToStakeInfo;
     Config private _config;
 
     constructor(
@@ -52,21 +67,12 @@ contract StakeableArchetype is ERC721A, Ownable {
             _setExtraDataAt(fstNextId, 1);
     }
 
-    function stake(uint256 tokenId) public {
+    function stake(uint256 tokenId, uint32 time) public {
+        require(time >= _config.stakingConfig.minStakingTime);
         require(ownerOf(tokenId) == msg.sender);
         require(!isStaked(tokenId));
 
         _tokenIdToStakeInfo[tokenId].stakedTimestamp = uint32(block.timestamp);
-    }
-
-    function unstake(uint256 tokenId) public {
-        require(ownerOf(tokenId) == msg.sender);
-        require(canGetUnstaked(tokenId));
-
-        StakeTokenInfo memory currentStake = _tokenIdToStakeInfo[tokenId];
-        currentStake.totalTimeStaked += uint32(block.timestamp - currentStake.stakedTimestamp);
-        currentStake.stakedTimestamp = 0;
-        _tokenIdToStakeInfo[tokenId] = currentStake;
     }
 
     function isStaked(uint256 tokenId) public view returns (bool) {
