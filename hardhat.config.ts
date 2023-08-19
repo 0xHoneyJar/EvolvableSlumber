@@ -5,7 +5,15 @@ import "@nomicfoundation/hardhat-toolbox";
 const privateKey = process.env.PRIVATE_KEY || "";
 
 const config: HardhatUserConfig = {
-    solidity: '0.8.18',
+    solidity: {
+        version: '0.8.18',
+        settings: {
+            optimizer: {
+                enabled: true,
+                runs: 1000
+            }
+        }
+    },
     defaultNetwork: 'hardhat',
     gasReporter: {
         enabled: true,
@@ -17,11 +25,10 @@ const config: HardhatUserConfig = {
     },
     networks: {
         hardhat: {
-            /*
             mining: {
                 auto: true,
                 interval: 1000
-            }*/
+            }
         },
         sepolia: {
             accounts: [privateKey],

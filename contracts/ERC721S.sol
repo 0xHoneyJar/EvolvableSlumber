@@ -5,22 +5,19 @@ pragma solidity ^0.8.10;
 
 import './interfaces/IERC721A.sol';
 
-/**
- * @dev Contract configuration for staking tokens.
- * @notice If `automaticStakeTimeOnMint == 0` the token won't get staked on mint.
- * @notice If `automaticStakeTimeOnTx == 0` the token won't get staked on tx.
- */
-struct StakingConfig {
-    uint32 minStakingTime;
-    uint32 automaticStakeTimeOnMint;
-    uint32 automaticStakeTimeOnTx;
-}
-
 struct Config {
-    uint128 deployTime;
-    uint128 price;
+    // Enough for the next ~80 years.
+    uint32 deployTime;
+    // Max price before overflow: 18.4 eth.
+    uint64 price;
+    // Enough to stake for a lifetime.
+    uint32 minStakingTime;
+    // Enough to stake for a lifetime.
+    uint32 automaticStakeTimeOnMint;
+    // Enough to stake for a lifetime.
+    uint32 automaticStakeTimeOnTx;
+    // Will be saved in the next slot.
     string baseUri;
-    StakingConfig stakingConfig;
 }
 
 /**
@@ -253,11 +250,13 @@ contract ERC721S is IERC721A {
     /**
      * @dev Returns the Uniform Resource Identifier (URI) for `tokenId` token.
      */
+    // TODO
     function tokenURI(uint256 tokenId) public view virtual override returns (string memory) {
-        if (!_exists(tokenId)) _revert(URIQueryForNonexistentToken.selector);
+        // if (!_exists(tokenId)) _revert(URIQueryForNonexistentToken.selector);
 
-        string memory baseURI = _baseURI();
-        return bytes(baseURI).length != 0 ? string(abi.encodePacked(baseURI, _toString(tokenId))) : '';
+        // string memory baseURI = _baseURI();
+        // return bytes(baseURI).length != 0 ? string(abi.encodePacked(baseURI, _toString(tokenId))) : '';
+        return "";
     }
 
     /**
@@ -325,60 +324,97 @@ contract ERC721S is IERC721A {
         }
         _revert(OwnerQueryForNonexistentToken.selector);
     }
-    
-    // TODO Optimize.
-    function _packOwnershipDataForMint(address owner) private view returns (uint256 result) {
-    
-        uint32 stakingTime = _config.stakingConfig.automaticStakeTimeOnMint;
-        if (stakingTime == 0) return uint256(owner & _BITMASK_ADDRESS);    
 
-        uint32 stakingStart = uint32(block.timestamp - _config.deployTime);
-        return (stakingTime << _BITPOS_STAKING_DURATION)
-            | (stakingStart << _BITPOS_STAKING_START)
-            | owner & _BITMASK_ADDRESS;
+    function _packOwnershipDataForMint(address owner) private view returns (uint256 result) {
+        assembly {
+            let conf := sload(_config.slot)
+
+            let onMintStakingTime := and(shr(128, conf), _BITMASK_STAKING_INFO)
+            if iszero(onMintStakingTime) {
+                return(owner, 0x20)
+            }
+            result := shl(_BITPOS_STAKING_DURATION, onMintStakingTime)
+
+            let deployTime := and(conf, _BITMASK_STAKING_INFO)
+            result := or(result, shl(_BITPOS_STAKING_START, sub(timestamp(), deployTime)))
+
+            result := or(result, owner)
+        }
     }
-    
     /**
      * @notice It assumes the token is unstaked.
      */
-    // TODO Optimize.
-    function _packOwnershipDataForTx(address newOwner, uint256 tokenId) private view returns (uint256 result) {
-        
-        uint256 oldOwnership = _packedOwnershipOf[tokenId];
-        uint32 totalTimeStaked = (oldOwnership >> _BITPOS_TOTAL_STAKED_TIME) & _BITMASK_STAKING_INFO;
-        uint32 extraTime = (oldOwnership >> _BITPOS_STAKING_DURATION) & _BITMASK_STAKING_INFO;
-        // Wont overflow in the next 136 years.
-        uint32 newTotalTimeStaked = totalTimeStaked + extraTime;
-            
-        uint32 stakingTime = _config.stakingConfig.automaticStakeTimeOnTx;
-        if (stakingTime != 0) {
-            uint32 stakingStart = uint32(block.timestamp - _config.deployTime);
-            result = (stakingTime << _BITPOS_STAKING_DURATION) | (stakingStart << _BITPOS_STAKING_START);
-        }
+    function _packOwnershipDataForTx(address newOwner, uint256 oldOwnership) private view returns (uint256 result) {
+        assembly {
 
-        result = result 
-            | (newTotalTimeStaked << _BITPOS_TOTAL_STAKED_TIME) 
-            | (newOwner & _BITMASK_ADDRESS); 
+            // SET STAKING DURATION IF THE TOKEN SHOULD GET STAKED ON TX.
+            { 
+                let conf := sload(_config.slot)
+                let stakingDurationOnTx := and(shr(160, conf), _BITMASK_STAKING_INFO)
+                // If the token should get staked on tx, set that staking data into the result.
+                if not(iszero(stakingDurationOnTx)) {
+                    // Calc relative staking start to the deployment time.
+                    let stakingStart := sub(timestamp(), and(conf, _BITMASK_STAKING_INFO))
+                    // Concat the staking start to the total time the token is gonna be staked.
+                    result := or(
+                        shl(_BITPOS_STAKING_DURATION, stakingDurationOnTx),
+                        shl(_BITPOS_STAKING_START, stakingStart)
+                    )
+                }
+            }
+
+            // UPDATE THE TOTAL TIME STAKED BASED ON THE LAST STAKE.
+            {
+                let totalTimeStaked := and(shr(_BITPOS_TOTAL_STAKED_TIME, oldOwnership), _BITMASK_STAKING_INFO)
+                // Wont overflow in the next ~136 years.
+                totalTimeStaked := add(
+                    totalTimeStaked,
+                    and(shr(_BITPOS_STAKING_DURATION, oldOwnership), _BITMASK_STAKING_INFO)
+                )
+
+                // Append the new owner and the total time staked to the result.
+                result := or(result, or(
+                    shl(_BITPOS_TOTAL_STAKED_TIME, totalTimeStaked),
+                    newOwner
+                ))
+            }
+
+        }
     }
 
     /**
      * @notice It assumes that the token is unstaked and that `tokenId` owner agreed to this operation.
      */
-    function _updateOwnershipDataForStaking(uint256 tokenId, uint32 time) private view returns (uint256) {
+    function _updateOwnershipDataForStaking2(uint256 oldOwnership, uint32 time) private view returns (uint256) {
+        assembly {
+            // Revert if `time` is less than the min staking time.
+            if lt(time, and(shr(96, sload(_config.slot)), _BITMASK_STAKING_INFO)) {
+                revert(0,0) 
+            }
 
-        uint256 oldOwnership = _packedOwnershipOf[tokenId];
-        uint160 owner = oldOwnership & _BITMASK_ADDRESS;
+            // Update total time staked based on the last stake.
+            let totalTimeStaked := and(shr(_BITPOS_TOTAL_STAKED_TIME, oldOwnership), _BITMASK_STAKING_INFO)
+            // Wont overflow in the next ~136 years.
+            totalTimeStaked := add(
+                totalTimeStaked, 
+                and(shr(_BITPOS_STAKING_DURATION, oldOwnership), _BITMASK_STAKING_INFO)
+            )
 
-        uint32 totalTimeStaked = (oldOwnership >> _BITPOS_TOTAL_STAKED_TIME) & _BITMASK_STAKING_INFO;
-        uint32 extraTime = (oldOwnership >> _BITPOS_STAKING_DURATION) & _BITMASK_STAKING_INFO;
+            // Calc relative staking start to the deployment time.
+            let stakingStart := sub(timestamp(), time)
 
-        uint32 newTotalTimeStaked = totalTimeStaked + extraTime;
-        uint32 stakingStart = uint32(block.timestamp - _config.deployTime);
-
-        return (time << _BITPOS_STAKING_DURATION) 
-            | (stakingStart << _BITPOS_STAKING_START) 
-            | (newTotalTimeStaked << _BITPOS_TOTAL_STAKED_TIME) 
-            | owner;
+            // Concat owner with new total time staked, the staking start relative to 
+            // the deployment time and the total time the token will be staked.
+            oldOwnership := and(oldOwnership, _BITMASK_ADDRESS)
+            oldOwnership := or(
+                oldOwnership,
+                or(shl(_BITPOS_STAKING_DURATION, time), or(
+                    shr(_BITPOS_STAKING_START, stakingStart),
+                    shr(_BITPOS_TOTAL_STAKED_TIME, totalTimeStaked)
+                ))
+            )
+            return(oldOwnership, 0x20)
+        }
     }
 
     // =============================================================
@@ -404,7 +440,7 @@ contract ERC721S is IERC721A {
      * - `tokenId` must exist.
      */
     function getApproved(uint256 tokenId) public view virtual override returns (address) {
-        if (!_exists(tokenId)) _revert(ApprovalQueryForNonexistentToken.selector);
+        // if (!_exists(tokenId)) _revert(ApprovalQueryForNonexistentToken.selector);
 
         return _tokenApprovals[tokenId].value;
     }
@@ -441,49 +477,52 @@ contract ERC721S is IERC721A {
      *
      * Tokens start existing when they are minted. See {_mint}.
      */
-    function _exists(uint256 tokenId) internal view virtual returns (bool result) {
-        if (_startTokenId() <= tokenId) {
-            if (tokenId < _currentIndex) {
-                uint256 packed;
-                while ((packed = _packedOwnerships[tokenId]) == 0) --tokenId;
-                result = packed & _BITMASK_BURNED == 0;
-            }
-        }
-    }
+    // TODO
+    //function _exists(uint256 tokenId) internal view virtual returns (bool result) {
+    //    if (_startTokenId() <= tokenId) {
+    //        if (tokenId < _currentIndex) {
+    //            uint256 packed;
+    //            while ((packed = _packedOwnerships[tokenId]) == 0) --tokenId;
+    //            result = packed & _BITMASK_BURNED == 0;
+    //        }
+    //    }
+    //}
 
     /**
      * @dev Returns whether `msgSender` is equal to `approvedAddress` or `owner`.
      */
-    function _isSenderApprovedOrOwner(
-        address approvedAddress,
-        address owner,
-        address msgSender
-    ) private pure returns (bool result) {
-        assembly {
-            // Mask `owner` to the lower 160 bits, in case the upper bits somehow aren't clean.
-            owner := and(owner, _BITMASK_ADDRESS)
-            // Mask `msgSender` to the lower 160 bits, in case the upper bits somehow aren't clean.
-            msgSender := and(msgSender, _BITMASK_ADDRESS)
-            // `msgSender == owner || msgSender == approvedAddress`.
-            result := or(eq(msgSender, owner), eq(msgSender, approvedAddress))
-        }
-    }
+    // TODO
+    //function _isSenderApprovedOrOwner(
+    //    address approvedAddress,
+    //    address owner,
+    //    address msgSender
+    //) private pure returns (bool result) {
+    //    assembly {
+    //        // Mask `owner` to the lower 160 bits, in case the upper bits somehow aren't clean.
+    //        owner := and(owner, _BITMASK_ADDRESS)
+    //        // Mask `msgSender` to the lower 160 bits, in case the upper bits somehow aren't clean.
+    //        msgSender := and(msgSender, _BITMASK_ADDRESS)
+    //        // `msgSender == owner || msgSender == approvedAddress`.
+    //        result := or(eq(msgSender, owner), eq(msgSender, approvedAddress))
+    //    }
+    //}
 
     /**
      * @dev Returns the storage slot and value for the approved address of `tokenId`.
      */
-    function _getApprovedSlotAndAddress(uint256 tokenId)
-        private
-        view
-        returns (uint256 approvedAddressSlot, address approvedAddress)
-    {
-        TokenApprovalRef storage tokenApproval = _tokenApprovals[tokenId];
-        // The following is equivalent to `approvedAddress = _tokenApprovals[tokenId].value`.
-        assembly {
-            approvedAddressSlot := tokenApproval.slot
-            approvedAddress := sload(approvedAddressSlot)
-        }
-    }
+    // TODO
+    //function _getApprovedSlotAndAddress(uint256 tokenId)
+    //    private
+    //    view
+    //    returns (uint256 approvedAddressSlot, address approvedAddress)
+    //{
+    //    TokenApprovalRef storage tokenApproval = _tokenApprovals[tokenId];
+    //    // The following is equivalent to `approvedAddress = _tokenApprovals[tokenId].value`.
+    //    assembly {
+    //        approvedAddressSlot := tokenApproval.slot
+    //        approvedAddress := sload(approvedAddressSlot)
+    //    }
+    //}
 
     // =============================================================
     //                      TRANSFER OPERATIONS
@@ -502,82 +541,83 @@ contract ERC721S is IERC721A {
      *
      * Emits a {Transfer} event.
      */
+    // TODO
     function transferFrom(
         address from,
         address to,
         uint256 tokenId
     ) public payable virtual override {
-        uint256 prevOwnershipPacked = _packedOwnershipOf(tokenId);
+        //uint256 prevOwnershipPacked = _packedOwnershipOf(tokenId);
 
-        // Mask `from` to the lower 160 bits, in case the upper bits somehow aren't clean.
-        from = address(uint160(uint256(uint160(from)) & _BITMASK_ADDRESS));
+        //// Mask `from` to the lower 160 bits, in case the upper bits somehow aren't clean.
+        //from = address(uint160(uint256(uint160(from)) & _BITMASK_ADDRESS));
 
-        if (address(uint160(prevOwnershipPacked)) != from) _revert(TransferFromIncorrectOwner.selector);
+        //if (address(uint160(prevOwnershipPacked)) != from) _revert(TransferFromIncorrectOwner.selector);
 
-        (uint256 approvedAddressSlot, address approvedAddress) = _getApprovedSlotAndAddress(tokenId);
+        //(uint256 approvedAddressSlot, address approvedAddress) = _getApprovedSlotAndAddress(tokenId);
 
-        // The nested ifs save around 20+ gas over a compound boolean condition.
-        if (!_isSenderApprovedOrOwner(approvedAddress, from, _msgSenderERC721A()))
-            if (!isApprovedForAll(from, _msgSenderERC721A())) _revert(TransferCallerNotOwnerNorApproved.selector);
+        //// The nested ifs save around 20+ gas over a compound boolean condition.
+        //if (!_isSenderApprovedOrOwner(approvedAddress, from, _msgSenderERC721A()))
+        //    if (!isApprovedForAll(from, _msgSenderERC721A())) _revert(TransferCallerNotOwnerNorApproved.selector);
 
-        _beforeTokenTransfers(from, to, tokenId, 1);
+        //_beforeTokenTransfers(from, to, tokenId, 1);
 
-        // Clear approvals from the previous owner.
-        assembly {
-            if approvedAddress {
-                // This is equivalent to `delete _tokenApprovals[tokenId]`.
-                sstore(approvedAddressSlot, 0)
-            }
-        }
+        //// Clear approvals from the previous owner.
+        //assembly {
+        //    if approvedAddress {
+        //        // This is equivalent to `delete _tokenApprovals[tokenId]`.
+        //        sstore(approvedAddressSlot, 0)
+        //    }
+        //}
 
-        // Underflow of the sender's balance is impossible because we check for
-        // ownership above and the recipient's balance can't realistically overflow.
-        // Counter overflow is incredibly unrealistic as `tokenId` would have to be 2**256.
-        unchecked {
-            // We can directly increment and decrement the balances.
-            --_packedAddressData[from]; // Updates: `balance -= 1`.
-            ++_packedAddressData[to]; // Updates: `balance += 1`.
+        //// Underflow of the sender's balance is impossible because we check for
+        //// ownership above and the recipient's balance can't realistically overflow.
+        //// Counter overflow is incredibly unrealistic as `tokenId` would have to be 2**256.
+        //unchecked {
+        //    // We can directly increment and decrement the balances.
+        //    --_packedAddressData[from]; // Updates: `balance -= 1`.
+        //    ++_packedAddressData[to]; // Updates: `balance += 1`.
 
-            // Updates:
-            // - `address` to the next owner.
-            // - `startTimestamp` to the timestamp of transfering.
-            // - `burned` to `false`.
-            // - `nextInitialized` to `true`.
-            _packedOwnerships[tokenId] = _packOwnershipData(
-                to,
-                _BITMASK_NEXT_INITIALIZED | _nextExtraData(from, to, prevOwnershipPacked)
-            );
+        //    // Updates:
+        //    // - `address` to the next owner.
+        //    // - `startTimestamp` to the timestamp of transfering.
+        //    // - `burned` to `false`.
+        //    // - `nextInitialized` to `true`.
+        //    _packedOwnerships[tokenId] = _packOwnershipData(
+        //        to,
+        //        _BITMASK_NEXT_INITIALIZED | _nextExtraData(from, to, prevOwnershipPacked)
+        //    );
 
-            // If the next slot may not have been initialized (i.e. `nextInitialized == false`) .
-            if (prevOwnershipPacked & _BITMASK_NEXT_INITIALIZED == 0) {
-                uint256 nextTokenId = tokenId + 1;
-                // If the next slot's address is zero and not burned (i.e. packed value is zero).
-                if (_packedOwnerships[nextTokenId] == 0) {
-                    // If the next slot is within bounds.
-                    if (nextTokenId != _currentIndex) {
-                        // Initialize the next slot to maintain correctness for `ownerOf(tokenId + 1)`.
-                        _packedOwnerships[nextTokenId] = prevOwnershipPacked;
-                    }
-                }
-            }
-        }
+        //    // If the next slot may not have been initialized (i.e. `nextInitialized == false`) .
+        //    if (prevOwnershipPacked & _BITMASK_NEXT_INITIALIZED == 0) {
+        //        uint256 nextTokenId = tokenId + 1;
+        //        // If the next slot's address is zero and not burned (i.e. packed value is zero).
+        //        if (_packedOwnerships[nextTokenId] == 0) {
+        //            // If the next slot is within bounds.
+        //            if (nextTokenId != _currentIndex) {
+        //                // Initialize the next slot to maintain correctness for `ownerOf(tokenId + 1)`.
+        //                _packedOwnerships[nextTokenId] = prevOwnershipPacked;
+        //            }
+        //        }
+        //    }
+        //}
 
-        // Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
-        uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
-        assembly {
-            // Emit the `Transfer` event.
-            log4(
-                0, // Start of data (0, since no data).
-                0, // End of data (0, since no data).
-                _TRANSFER_EVENT_SIGNATURE, // Signature.
-                from, // `from`.
-                toMasked, // `to`.
-                tokenId // `tokenId`.
-            )
-        }
-        if (toMasked == 0) _revert(TransferToZeroAddress.selector);
+        //// Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
+        //uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
+        //assembly {
+        //    // Emit the `Transfer` event.
+        //    log4(
+        //        0, // Start of data (0, since no data).
+        //        0, // End of data (0, since no data).
+        //        _TRANSFER_EVENT_SIGNATURE, // Signature.
+        //        from, // `from`.
+        //        toMasked, // `to`.
+        //        tokenId // `tokenId`.
+        //    )
+        //}
+        //if (toMasked == 0) _revert(TransferToZeroAddress.selector);
 
-        _afterTokenTransfers(from, to, tokenId, 1);
+        //_afterTokenTransfers(from, to, tokenId, 1);
     }
 
     /**
@@ -606,17 +646,18 @@ contract ERC721S is IERC721A {
      *
      * Emits a {Transfer} event.
      */
+    // TODO
     function safeTransferFrom(
         address from,
         address to,
         uint256 tokenId,
         bytes memory _data
     ) public payable virtual override {
-        transferFrom(from, to, tokenId);
-        if (to.code.length != 0)
-            if (!_checkContractOnERC721Received(from, to, tokenId, _data)) {
-                _revert(TransferToNonERC721ReceiverImplementer.selector);
-            }
+        //transferFrom(from, to, tokenId);
+        //if (to.code.length != 0)
+        //    if (!_checkContractOnERC721Received(from, to, tokenId, _data)) {
+        //        _revert(TransferToNonERC721ReceiverImplementer.selector);
+        //    }
     }
 
     /**
@@ -675,25 +716,26 @@ contract ERC721S is IERC721A {
      *
      * Returns whether the call correctly returned the expected magic value.
      */
-    function _checkContractOnERC721Received(
-        address from,
-        address to,
-        uint256 tokenId,
-        bytes memory _data
-    ) private returns (bool) {
-        try ERC721A__IERC721Receiver(to).onERC721Received(_msgSenderERC721A(), from, tokenId, _data) returns (
-            bytes4 retval
-        ) {
-            return retval == ERC721A__IERC721Receiver(to).onERC721Received.selector;
-        } catch (bytes memory reason) {
-            if (reason.length == 0) {
-                _revert(TransferToNonERC721ReceiverImplementer.selector);
-            }
-            assembly {
-                revert(add(32, reason), mload(reason))
-            }
-        }
-    }
+    // TODO
+    //function _checkContractOnERC721Received(
+    //    address from,
+    //    address to,
+    //    uint256 tokenId,
+    //    bytes memory _data
+    //) private returns (bool) {
+    //    try ERC721A__IERC721Receiver(to).onERC721Received(_msgSenderERC721A(), from, tokenId, _data) returns (
+    //        bytes4 retval
+    //    ) {
+    //        return retval == ERC721A__IERC721Receiver(to).onERC721Received.selector;
+    //    } catch (bytes memory reason) {
+    //        if (reason.length == 0) {
+    //            _revert(TransferToNonERC721ReceiverImplementer.selector);
+    //        }
+    //        assembly {
+    //            revert(add(32, reason), mload(reason))
+    //        }
+    //    }
+    //}
 
     // =============================================================
     //                        MINT OPERATIONS
@@ -711,66 +753,67 @@ contract ERC721S is IERC721A {
      *
      * Emits a {Transfer} event for each mint.
      */
-    function _mint(
-        address to,
-        uint256 quantity,
-        uint32 stakingTime,
-        uint32 stakingStart
-    ) internal virtual {
-        uint256 startTokenId = _currentIndex;
-        if (quantity == 0) _revert(MintZeroQuantity.selector);
+    // TODO
+    //function _mint(
+    //    address to,
+    //    uint256 quantity,
+    //    uint32 stakingTime,
+    //    uint32 stakingStart
+    //) internal virtual {
+    //    uint256 startTokenId = _currentIndex;
+    //    if (quantity == 0) _revert(MintZeroQuantity.selector);
 
-        _beforeTokenTransfers(address(0), to, startTokenId, quantity);
+    //    _beforeTokenTransfers(address(0), to, startTokenId, quantity);
 
-        // Overflows are incredibly unrealistic.
-        // `balance` and `numberMinted` have a maximum limit of 2**64.
-        // `tokenId` has a maximum limit of 2**256.
-        unchecked {
-            // Updates:
-            // - `address` to the owner.
-            // - `startTimestamp` to the timestamp of minting.
-            // - `burned` to `false`.
-            // - `nextInitialized` to `quantity == 1`.
-            _packedOwnerships[startTokenId] = _packOwnershipData(
-                to,
-                _nextInitializedFlag(quantity) | _nextExtraData(address(0), to, 0)
-            );
+    //    // Overflows are incredibly unrealistic.
+    //    // `balance` and `numberMinted` have a maximum limit of 2**64.
+    //    // `tokenId` has a maximum limit of 2**256.
+    //    unchecked {
+    //        // Updates:
+    //        // - `address` to the owner.
+    //        // - `startTimestamp` to the timestamp of minting.
+    //        // - `burned` to `false`.
+    //        // - `nextInitialized` to `quantity == 1`.
+    //        _packedOwnerships[startTokenId] = _packOwnershipData(
+    //            to,
+    //            _nextInitializedFlag(quantity) | _nextExtraData(address(0), to, 0)
+    //        );
 
-            // Updates:
-            // - `balance += quantity`.
-            // - `numberMinted += quantity`.
-            //
-            // We can directly add to the `balance` and `numberMinted`.
-            _packedAddressData[to] += quantity * ((1 << _BITPOS_NUMBER_MINTED) | 1);
+    //        // Updates:
+    //        // - `balance += quantity`.
+    //        // - `numberMinted += quantity`.
+    //        //
+    //        // We can directly add to the `balance` and `numberMinted`.
+    //        _packedAddressData[to] += quantity * ((1 << _BITPOS_NUMBER_MINTED) | 1);
 
-            // Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
-            uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
+    //        // Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
+    //        uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
 
-            if (toMasked == 0) _revert(MintToZeroAddress.selector);
+    //        if (toMasked == 0) _revert(MintToZeroAddress.selector);
 
-            uint256 end = startTokenId + quantity;
-            uint256 tokenId = startTokenId;
+    //        uint256 end = startTokenId + quantity;
+    //        uint256 tokenId = startTokenId;
 
-            do {
-                assembly {
-                    // Emit the `Transfer` event.
-                    log4(
-                        0, // Start of data (0, since no data).
-                        0, // End of data (0, since no data).
-                        _TRANSFER_EVENT_SIGNATURE, // Signature.
-                        0, // `address(0)`.
-                        toMasked, // `to`.
-                        tokenId // `tokenId`.
-                    )
-                }
-                // The `!=` check ensures that large values of `quantity`
-                // that overflows uint256 will make the loop run out of gas.
-            } while (++tokenId != end);
+    //        do {
+    //            assembly {
+    //                // Emit the `Transfer` event.
+    //                log4(
+    //                    0, // Start of data (0, since no data).
+    //                    0, // End of data (0, since no data).
+    //                    _TRANSFER_EVENT_SIGNATURE, // Signature.
+    //                    0, // `address(0)`.
+    //                    toMasked, // `to`.
+    //                    tokenId // `tokenId`.
+    //                )
+    //            }
+    //            // The `!=` check ensures that large values of `quantity`
+    //            // that overflows uint256 will make the loop run out of gas.
+    //        } while (++tokenId != end);
 
-            _currentIndex = end;
-        }
-        _afterTokenTransfers(address(0), to, startTokenId, quantity);
-    }
+    //        _currentIndex = end;
+    //    }
+    //    _afterTokenTransfers(address(0), to, startTokenId, quantity);
+    //}
 
     /**
      * @dev Mints `quantity` tokens and transfers them to `to`.
@@ -793,39 +836,40 @@ contract ERC721S is IERC721A {
      *
      * Emits a {ConsecutiveTransfer} event.
      */
-    function _mintERC2309(address to, uint256 quantity) internal virtual {
-        uint256 startTokenId = _currentIndex;
-        if (to == address(0)) _revert(MintToZeroAddress.selector);
-        if (quantity == 0) _revert(MintZeroQuantity.selector);
-        if (quantity > _MAX_MINT_ERC2309_QUANTITY_LIMIT) _revert(MintERC2309QuantityExceedsLimit.selector);
+    // TODO
+    // function _mintERC2309(address to, uint256 quantity) internal virtual {
+    //     uint256 startTokenId = _currentIndex;
+    //     if (to == address(0)) _revert(MintToZeroAddress.selector);
+    //     if (quantity == 0) _revert(MintZeroQuantity.selector);
+    //     if (quantity > _MAX_MINT_ERC2309_QUANTITY_LIMIT) _revert(MintERC2309QuantityExceedsLimit.selector);
 
-        _beforeTokenTransfers(address(0), to, startTokenId, quantity);
+    //     _beforeTokenTransfers(address(0), to, startTokenId, quantity);
 
-        // Overflows are unrealistic due to the above check for `quantity` to be below the limit.
-        unchecked {
-            // Updates:
-            // - `balance += quantity`.
-            // - `numberMinted += quantity`.
-            //
-            // We can directly add to the `balance` and `numberMinted`.
-            _packedAddressData[to] += quantity * ((1 << _BITPOS_NUMBER_MINTED) | 1);
+    //     // Overflows are unrealistic due to the above check for `quantity` to be below the limit.
+    //     unchecked {
+    //         // Updates:
+    //         // - `balance += quantity`.
+    //         // - `numberMinted += quantity`.
+    //         //
+    //         // We can directly add to the `balance` and `numberMinted`.
+    //         _packedAddressData[to] += quantity * ((1 << _BITPOS_NUMBER_MINTED) | 1);
 
-            // Updates:
-            // - `address` to the owner.
-            // - `startTimestamp` to the timestamp of minting.
-            // - `burned` to `false`.
-            // - `nextInitialized` to `quantity == 1`.
-            _packedOwnerships[startTokenId] = _packOwnershipData(
-                to,
-                _nextInitializedFlag(quantity) | _nextExtraData(address(0), to, 0)
-            );
+    //         // Updates:
+    //         // - `address` to the owner.
+    //         // - `startTimestamp` to the timestamp of minting.
+    //         // - `burned` to `false`.
+    //         // - `nextInitialized` to `quantity == 1`.
+    //         _packedOwnerships[startTokenId] = _packOwnershipData(
+    //             to,
+    //             _nextInitializedFlag(quantity) | _nextExtraData(address(0), to, 0)
+    //         );
 
-            emit ConsecutiveTransfer(startTokenId, startTokenId + quantity - 1, address(0), to);
+    //         emit ConsecutiveTransfer(startTokenId, startTokenId + quantity - 1, address(0), to);
 
-            _currentIndex = startTokenId + quantity;
-        }
-        _afterTokenTransfers(address(0), to, startTokenId, quantity);
-    }
+    //         _currentIndex = startTokenId + quantity;
+    //     }
+    //     _afterTokenTransfers(address(0), to, startTokenId, quantity);
+    // }
 
     /**
      * @dev Safely mints `quantity` tokens and transfers them to `to`.
@@ -840,34 +884,36 @@ contract ERC721S is IERC721A {
      *
      * Emits a {Transfer} event for each mint.
      */
-    function _safeMint(
-        address to,
-        uint256 quantity,
-        bytes memory _data
-    ) internal virtual {
-        _mint(to, quantity);
+    // TODO
+    // function _safeMint(
+    //     address to,
+    //     uint256 quantity,
+    //     bytes memory _data
+    // ) internal virtual {
+    //     _mint(to, quantity);
 
-        unchecked {
-            if (to.code.length != 0) {
-                uint256 end = _currentIndex;
-                uint256 index = end - quantity;
-                do {
-                    if (!_checkContractOnERC721Received(address(0), to, index++, _data)) {
-                        _revert(TransferToNonERC721ReceiverImplementer.selector);
-                    }
-                } while (index < end);
-                // Reentrancy protection.
-                if (_currentIndex != end) _revert(bytes4(0));
-            }
-        }
-    }
+    //     unchecked {
+    //         if (to.code.length != 0) {
+    //             uint256 end = _currentIndex;
+    //             uint256 index = end - quantity;
+    //             do {
+    //                 if (!_checkContractOnERC721Received(address(0), to, index++, _data)) {
+    //                     _revert(TransferToNonERC721ReceiverImplementer.selector);
+    //                 }
+    //             } while (index < end);
+    //             // Reentrancy protection.
+    //             if (_currentIndex != end) _revert(bytes4(0));
+    //         }
+    //     }
+    // }
 
     /**
      * @dev Equivalent to `_safeMint(to, quantity, '')`.
      */
-    function _safeMint(address to, uint256 quantity) internal virtual {
-        _safeMint(to, quantity, '');
-    }
+    // TODO
+    // function _safeMint(address to, uint256 quantity) internal virtual {
+    //     _safeMint(to, quantity, '');
+    // }
 
     // =============================================================
     //                       APPROVAL OPERATIONS
@@ -916,87 +962,20 @@ contract ERC721S is IERC721A {
     /**
      * @dev Equivalent to `_burn(tokenId, false)`.
      */
-    function _burn(uint256 tokenId) internal virtual {
-        _burn(tokenId, false);
-    }
+    // function _burn(uint256 tokenId) internal virtual {
+    //     _burn(tokenId, false);
+    // }
 
     /**
-     * @dev Destroys `tokenId`.
-     * The approval is cleared when the token is burned.
+     * @dev destroys `tokenid`.
+     * the approval is cleared when the token is burned.
      *
-     * Requirements:
+     * requirements:
      *
-     * - `tokenId` must exist.
+     * - `tokenid` must exist.
      *
-     * Emits a {Transfer} event.
+     * emits a {transfer} event.
      */
-    function _burn(uint256 tokenId, bool approvalCheck) internal virtual {
-        uint256 prevOwnershipPacked = _packedOwnershipOf(tokenId);
-
-        address from = address(uint160(prevOwnershipPacked));
-
-        (uint256 approvedAddressSlot, address approvedAddress) = _getApprovedSlotAndAddress(tokenId);
-
-        if (approvalCheck) {
-            // The nested ifs save around 20+ gas over a compound boolean condition.
-            if (!_isSenderApprovedOrOwner(approvedAddress, from, _msgSenderERC721A()))
-                if (!isApprovedForAll(from, _msgSenderERC721A())) _revert(TransferCallerNotOwnerNorApproved.selector);
-        }
-
-        _beforeTokenTransfers(from, address(0), tokenId, 1);
-
-        // Clear approvals from the previous owner.
-        assembly {
-            if approvedAddress {
-                // This is equivalent to `delete _tokenApprovals[tokenId]`.
-                sstore(approvedAddressSlot, 0)
-            }
-        }
-
-        // Underflow of the sender's balance is impossible because we check for
-        // ownership above and the recipient's balance can't realistically overflow.
-        // Counter overflow is incredibly unrealistic as `tokenId` would have to be 2**256.
-        unchecked {
-            // Updates:
-            // - `balance -= 1`.
-            // - `numberBurned += 1`.
-            //
-            // We can directly decrement the balance, and increment the number burned.
-            // This is equivalent to `packed -= 1; packed += 1 << _BITPOS_NUMBER_BURNED;`.
-            _packedAddressData[from] += (1 << _BITPOS_NUMBER_BURNED) - 1;
-
-            // Updates:
-            // - `address` to the last owner.
-            // - `startTimestamp` to the timestamp of burning.
-            // - `burned` to `true`.
-            // - `nextInitialized` to `true`.
-            _packedOwnerships[tokenId] = _packOwnershipData(
-                from,
-                (_BITMASK_BURNED | _BITMASK_NEXT_INITIALIZED) | _nextExtraData(from, address(0), prevOwnershipPacked)
-            );
-
-            // If the next slot may not have been initialized (i.e. `nextInitialized == false`) .
-            if (prevOwnershipPacked & _BITMASK_NEXT_INITIALIZED == 0) {
-                uint256 nextTokenId = tokenId + 1;
-                // If the next slot's address is zero and not burned (i.e. packed value is zero).
-                if (_packedOwnerships[nextTokenId] == 0) {
-                    // If the next slot is within bounds.
-                    if (nextTokenId != _currentIndex) {
-                        // Initialize the next slot to maintain correctness for `ownerOf(tokenId + 1)`.
-                        _packedOwnerships[nextTokenId] = prevOwnershipPacked;
-                    }
-                }
-            }
-        }
-
-        emit Transfer(from, address(0), tokenId);
-        _afterTokenTransfers(from, address(0), tokenId, 1);
-
-        // Overflow not possible, as _burnCounter cannot be exceed _currentIndex times.
-        unchecked {
-            _burnCounter++;
-        }
-    }
 
     // =============================================================
     //                     EXTRA DATA OPERATIONS
@@ -1005,17 +984,18 @@ contract ERC721S is IERC721A {
     /**
      * @dev Directly sets the extra data for the ownership data `index`.
      */
-    function _setExtraDataAt(uint256 index, uint24 extraData) internal virtual {
-        uint256 packed = _packedOwnerships[index];
-        if (packed == 0) _revert(OwnershipNotInitializedForExtraData.selector);
-        uint256 extraDataCasted;
-        // Cast `extraData` with assembly to avoid redundant masking.
-        assembly {
-            extraDataCasted := extraData
-        }
-        packed = (packed & _BITMASK_EXTRA_DATA_COMPLEMENT) | (extraDataCasted << _BITPOS_EXTRA_DATA);
-        _packedOwnerships[index] = packed;
-    }
+    // TODO
+    // function _setExtraDataAt(uint256 index, uint24 extraData) internal virtual {
+    //     uint256 packed = _packedOwnerships[index];
+    //     if (packed == 0) _revert(OwnershipNotInitializedForExtraData.selector);
+    //     uint256 extraDataCasted;
+    //     // Cast `extraData` with assembly to avoid redundant masking.
+    //     assembly {
+    //         extraDataCasted := extraData
+    //     }
+    //     packed = (packed & _BITMASK_EXTRA_DATA_COMPLEMENT) | (extraDataCasted << _BITPOS_EXTRA_DATA);
+    //     _packedOwnerships[index] = packed;
+    // }
 
     /**
      * @dev Called during each token transfer to set the 24bit `extraData` field.
@@ -1041,14 +1021,15 @@ contract ERC721S is IERC721A {
      * @dev Returns the next extra data for the packed ownership data.
      * The returned result is shifted into position.
      */
-    function _nextExtraData(
-        address from,
-        address to,
-        uint256 prevOwnershipPacked
-    ) private view returns (uint256) {
-        uint24 extraData = uint24(prevOwnershipPacked >> _BITPOS_EXTRA_DATA);
-        return uint256(_extraData(from, to, extraData)) << _BITPOS_EXTRA_DATA;
-    }
+    // TODO
+    // function _nextExtraData(
+    //     address from,
+    //     address to,
+    //     uint256 prevOwnershipPacked
+    // ) private view returns (uint256) {
+    //     uint24 extraData = uint24(prevOwnershipPacked >> _BITPOS_EXTRA_DATA);
+    //     return uint256(_extraData(from, to, extraData)) << _BITPOS_EXTRA_DATA;
+    // }
 
     // =============================================================
     //                       OTHER OPERATIONS
