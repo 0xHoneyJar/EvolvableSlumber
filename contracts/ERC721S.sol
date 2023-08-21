@@ -20,6 +20,8 @@ struct Config {
     string baseUri;
 }
 
+error WrongContractStakingConfig();
+
 /**
  * @title ERC721S
  *
@@ -75,6 +77,13 @@ contract ERC721S is IERC721A {
 
         // Bit position for the total duration a token is being staked.
         uint256 private constant _BITPOS_STAKING_DURATION = 224;
+
+    // Extra constants.
+
+        // The `Transfer` event signature is given by:
+        // `keccak256(bytes("Transfer(address,address,uint256)"))`.
+        bytes32 private constant _TRANSFER_EVENT_SIGNATURE =
+            0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef;
 
 
 
@@ -250,13 +259,13 @@ contract ERC721S is IERC721A {
     /**
      * @dev Returns the Uniform Resource Identifier (URI) for `tokenId` token.
      */
-    // TODO
     function tokenURI(uint256 tokenId) public view virtual override returns (string memory) {
-        // if (!_exists(tokenId)) _revert(URIQueryForNonexistentToken.selector);
+        if (!_exists(tokenId)) _revert(URIQueryForNonexistentToken.selector);
 
-        // string memory baseURI = _baseURI();
-        // return bytes(baseURI).length != 0 ? string(abi.encodePacked(baseURI, _toString(tokenId))) : '';
-        return "";
+        string memory baseURI = _baseURI();
+        return bytes(baseURI).length != 0 
+            ? string(abi.encodePacked(baseURI, _toString(tokenId))) 
+            : '';
     }
 
     /**
@@ -325,22 +334,36 @@ contract ERC721S is IERC721A {
         _revert(OwnerQueryForNonexistentToken.selector);
     }
 
-    function _packOwnershipDataForMint(address owner) private view returns (uint256 result) {
+    /**
+     * Requirements:
+     *
+     * - The contract must be correctly configured, ie, you can't pack any staking data
+     *   if `_config.automaticStakeTimeOnMint == 0`.
+     */
+    function _packStakingDataForMint(address owner) private view returns (uint256 result) {
+        bytes4 wrongStakingConfigSelector = WrongContractStakingConfig.selector;
         assembly {
             let conf := sload(_config.slot)
 
+            // If the token shouldn't get staked on tx, revert.
             let onMintStakingTime := and(shr(128, conf), _BITMASK_STAKING_INFO)
             if iszero(onMintStakingTime) {
-                return(owner, 0x20)
+                mstore(0x00, wrongStakingConfigSelector)
+                revert(0x00, 0x04)
             }
+            // Otherwise, set that staking time.
             result := shl(_BITPOS_STAKING_DURATION, onMintStakingTime)
 
+            // Then, set the staking start timestamp relative to the deployment time.
             let deployTime := and(conf, _BITMASK_STAKING_INFO)
-            result := or(result, shl(_BITPOS_STAKING_START, sub(timestamp(), deployTime)))
+            let stakingStart := sub(timestamp(), deployTime)
+            result := or(result, shl(_BITPOS_STAKING_START, stakingStart))
 
+            // Finally, pack all the staking info with the owner and return it.
             result := or(result, owner)
         }
     }
+
     /**
      * @notice It assumes the token is unstaked.
      */
@@ -440,8 +463,7 @@ contract ERC721S is IERC721A {
      * - `tokenId` must exist.
      */
     function getApproved(uint256 tokenId) public view virtual override returns (address) {
-        // if (!_exists(tokenId)) _revert(ApprovalQueryForNonexistentToken.selector);
-
+        if (!_exists(tokenId)) _revert(ApprovalQueryForNonexistentToken.selector);
         return _tokenApprovals[tokenId].value;
     }
 
@@ -477,52 +499,43 @@ contract ERC721S is IERC721A {
      *
      * Tokens start existing when they are minted. See {_mint}.
      */
-    // TODO
-    //function _exists(uint256 tokenId) internal view virtual returns (bool result) {
-    //    if (_startTokenId() <= tokenId) {
-    //        if (tokenId < _currentIndex) {
-    //            uint256 packed;
-    //            while ((packed = _packedOwnerships[tokenId]) == 0) --tokenId;
-    //            result = packed & _BITMASK_BURNED == 0;
-    //        }
-    //    }
-    //}
+    function _exists(uint256 tokenId) internal view virtual returns (bool result) {
+        return tokenId >= _startTokenId() && tokenId < _currentIndex;
+    }
 
     /**
      * @dev Returns whether `msgSender` is equal to `approvedAddress` or `owner`.
      */
-    // TODO
-    //function _isSenderApprovedOrOwner(
-    //    address approvedAddress,
-    //    address owner,
-    //    address msgSender
-    //) private pure returns (bool result) {
-    //    assembly {
-    //        // Mask `owner` to the lower 160 bits, in case the upper bits somehow aren't clean.
-    //        owner := and(owner, _BITMASK_ADDRESS)
-    //        // Mask `msgSender` to the lower 160 bits, in case the upper bits somehow aren't clean.
-    //        msgSender := and(msgSender, _BITMASK_ADDRESS)
-    //        // `msgSender == owner || msgSender == approvedAddress`.
-    //        result := or(eq(msgSender, owner), eq(msgSender, approvedAddress))
-    //    }
-    //}
+    function _isSenderApprovedOrOwner(
+        address approvedAddress,
+        address owner,
+        address msgSender
+    ) private pure returns (bool result) {
+        assembly {
+            // Mask `owner` to the lower 160 bits, in case the upper bits somehow aren't clean.
+            owner := and(owner, _BITMASK_ADDRESS)
+            // Mask `msgSender` to the lower 160 bits, in case the upper bits somehow aren't clean.
+            msgSender := and(msgSender, _BITMASK_ADDRESS)
+            // `msgSender == owner || msgSender == approvedAddress`.
+            result := or(eq(msgSender, owner), eq(msgSender, approvedAddress))
+        }
+    }
 
     /**
      * @dev Returns the storage slot and value for the approved address of `tokenId`.
      */
-    // TODO
-    //function _getApprovedSlotAndAddress(uint256 tokenId)
-    //    private
-    //    view
-    //    returns (uint256 approvedAddressSlot, address approvedAddress)
-    //{
-    //    TokenApprovalRef storage tokenApproval = _tokenApprovals[tokenId];
-    //    // The following is equivalent to `approvedAddress = _tokenApprovals[tokenId].value`.
-    //    assembly {
-    //        approvedAddressSlot := tokenApproval.slot
-    //        approvedAddress := sload(approvedAddressSlot)
-    //    }
-    //}
+    function _getApprovedSlotAndAddress(uint256 tokenId)
+        private
+        view
+        returns (uint256 approvedAddressSlot, address approvedAddress)
+    {
+        TokenApprovalRef storage tokenApproval = _tokenApprovals[tokenId];
+        // The following is equivalent to `approvedAddress = _tokenApprovals[tokenId].value`.
+        assembly {
+            approvedAddressSlot := tokenApproval.slot
+            approvedAddress := sload(approvedAddressSlot)
+        }
+    }
 
     // =============================================================
     //                      TRANSFER OPERATIONS
@@ -741,6 +754,13 @@ contract ERC721S is IERC721A {
     //                        MINT OPERATIONS
     // =============================================================
 
+    function _mint(
+        address to,
+        uint256 quantity
+    ) internal virtual {
+        _mint(to, quantity, true);
+    }
+
     /**
      * @dev Mints `quantity` tokens and transfers them to `to`.
      *
@@ -748,172 +768,75 @@ contract ERC721S is IERC721A {
      *
      * - `to` cannot be the zero address.
      * - `quantity` must be greater than 0.
-     * - `stakingTime` must be in [0, 2**31 - 1].
-     * - `stakingStart` must be in [0, 2**31 - 1], relative to the deployment time.
+     * - if `stake`, then _config.minStakingTimeOnMint must be greater than 0.
      *
      * Emits a {Transfer} event for each mint.
      */
-    // TODO
-    //function _mint(
-    //    address to,
-    //    uint256 quantity,
-    //    uint32 stakingTime,
-    //    uint32 stakingStart
-    //) internal virtual {
-    //    uint256 startTokenId = _currentIndex;
-    //    if (quantity == 0) _revert(MintZeroQuantity.selector);
+    function _mint(
+        address to,
+        uint256 quantity,
+        bool stake
+    ) internal virtual {
+        uint256 startTokenId = _currentIndex;
+        if (quantity == 0) _revert(MintZeroQuantity.selector);
 
-    //    _beforeTokenTransfers(address(0), to, startTokenId, quantity);
+        _beforeTokenTransfers(address(0), to, startTokenId, quantity);
 
-    //    // Overflows are incredibly unrealistic.
-    //    // `balance` and `numberMinted` have a maximum limit of 2**64.
-    //    // `tokenId` has a maximum limit of 2**256.
-    //    unchecked {
-    //        // Updates:
-    //        // - `address` to the owner.
-    //        // - `startTimestamp` to the timestamp of minting.
-    //        // - `burned` to `false`.
-    //        // - `nextInitialized` to `quantity == 1`.
-    //        _packedOwnerships[startTokenId] = _packOwnershipData(
-    //            to,
-    //            _nextInitializedFlag(quantity) | _nextExtraData(address(0), to, 0)
-    //        );
+        unchecked {
+            if (stake)
+                _packedOwnerships[startTokenId] = _packStakingDataForMint(to);
+            else 
+                _packedOwnerships[startTokenId] = uint160(to);
 
-    //        // Updates:
-    //        // - `balance += quantity`.
-    //        // - `numberMinted += quantity`.
-    //        //
-    //        // We can directly add to the `balance` and `numberMinted`.
-    //        _packedAddressData[to] += quantity * ((1 << _BITPOS_NUMBER_MINTED) | 1);
+            // Updates:
+            // - `balance += quantity`.
+            // - `numberMinted += quantity`.
+            //
+            // We can directly add to the `balance` and `numberMinted`.
+            _packedAddressData[to] += quantity * ((1 << _BITPOS_NUMBER_MINTED) | 1);
 
-    //        // Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
-    //        uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
+            // Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
+            uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
 
-    //        if (toMasked == 0) _revert(MintToZeroAddress.selector);
+            if (toMasked == 0) _revert(MintToZeroAddress.selector);
 
-    //        uint256 end = startTokenId + quantity;
-    //        uint256 tokenId = startTokenId;
+            uint256 end = startTokenId + quantity;
+            uint256 tokenId = startTokenId;
 
-    //        do {
-    //            assembly {
-    //                // Emit the `Transfer` event.
-    //                log4(
-    //                    0, // Start of data (0, since no data).
-    //                    0, // End of data (0, since no data).
-    //                    _TRANSFER_EVENT_SIGNATURE, // Signature.
-    //                    0, // `address(0)`.
-    //                    toMasked, // `to`.
-    //                    tokenId // `tokenId`.
-    //                )
-    //            }
-    //            // The `!=` check ensures that large values of `quantity`
-    //            // that overflows uint256 will make the loop run out of gas.
-    //        } while (++tokenId != end);
 
-    //        _currentIndex = end;
-    //    }
-    //    _afterTokenTransfers(address(0), to, startTokenId, quantity);
-    //}
+            do {
+                assembly {
+                    // Emit the `Transfer` event.
+                    log4(
+                        0, // Start of data (0, since no data).
+                        0, // End of data (0, since no data).
+                        _TRANSFER_EVENT_SIGNATURE, // Signature.
+                        0, // `address(0)`.
+                        toMasked, // `to`.
+                        tokenId // `tokenId`.
+                    )
 
-    /**
-     * @dev Mints `quantity` tokens and transfers them to `to`.
-     *
-     * This function is intended for efficient minting only during contract creation.
-     *
-     * It emits only one {ConsecutiveTransfer} as defined in
-     * [ERC2309](https://eips.ethereum.org/EIPS/eip-2309),
-     * instead of a sequence of {Transfer} event(s).
-     *
-     * Calling this function outside of contract creation WILL make your contract
-     * non-compliant with the ERC721 standard.
-     * For full ERC721 compliance, substituting ERC721 {Transfer} event(s) with the ERC2309
-     * {ConsecutiveTransfer} event is only permissible during contract creation.
-     *
-     * Requirements:
-     *
-     * - `to` cannot be the zero address.
-     * - `quantity` must be greater than 0.
-     *
-     * Emits a {ConsecutiveTransfer} event.
-     */
-    // TODO
-    // function _mintERC2309(address to, uint256 quantity) internal virtual {
-    //     uint256 startTokenId = _currentIndex;
-    //     if (to == address(0)) _revert(MintToZeroAddress.selector);
-    //     if (quantity == 0) _revert(MintZeroQuantity.selector);
-    //     if (quantity > _MAX_MINT_ERC2309_QUANTITY_LIMIT) _revert(MintERC2309QuantityExceedsLimit.selector);
+                    if not(iszero(stake)) {
+                        // TODO Use Openseas staking standard.
+                        // TODO Optimize gas: you shouldn't need to check 
+                        // this conditionfor every lo0p.
+                        // log4(
+                        //     0,
+                        //     0,
+                        //     _STAKE_EVENT_SIGNATURE,
+                        //     etc
+                        // )
+                    }
+                }
+                // The `!=` check ensures that large values of `quantity`
+                // that overflows uint256 will make the loop run out of gas.
+            } while (++tokenId != end);
 
-    //     _beforeTokenTransfers(address(0), to, startTokenId, quantity);
+            _currentIndex = end;
+        }
+        _afterTokenTransfers(address(0), to, startTokenId, quantity);
+    }
 
-    //     // Overflows are unrealistic due to the above check for `quantity` to be below the limit.
-    //     unchecked {
-    //         // Updates:
-    //         // - `balance += quantity`.
-    //         // - `numberMinted += quantity`.
-    //         //
-    //         // We can directly add to the `balance` and `numberMinted`.
-    //         _packedAddressData[to] += quantity * ((1 << _BITPOS_NUMBER_MINTED) | 1);
-
-    //         // Updates:
-    //         // - `address` to the owner.
-    //         // - `startTimestamp` to the timestamp of minting.
-    //         // - `burned` to `false`.
-    //         // - `nextInitialized` to `quantity == 1`.
-    //         _packedOwnerships[startTokenId] = _packOwnershipData(
-    //             to,
-    //             _nextInitializedFlag(quantity) | _nextExtraData(address(0), to, 0)
-    //         );
-
-    //         emit ConsecutiveTransfer(startTokenId, startTokenId + quantity - 1, address(0), to);
-
-    //         _currentIndex = startTokenId + quantity;
-    //     }
-    //     _afterTokenTransfers(address(0), to, startTokenId, quantity);
-    // }
-
-    /**
-     * @dev Safely mints `quantity` tokens and transfers them to `to`.
-     *
-     * Requirements:
-     *
-     * - If `to` refers to a smart contract, it must implement
-     * {IERC721Receiver-onERC721Received}, which is called for each safe transfer.
-     * - `quantity` must be greater than 0.
-     *
-     * See {_mint}.
-     *
-     * Emits a {Transfer} event for each mint.
-     */
-    // TODO
-    // function _safeMint(
-    //     address to,
-    //     uint256 quantity,
-    //     bytes memory _data
-    // ) internal virtual {
-    //     _mint(to, quantity);
-
-    //     unchecked {
-    //         if (to.code.length != 0) {
-    //             uint256 end = _currentIndex;
-    //             uint256 index = end - quantity;
-    //             do {
-    //                 if (!_checkContractOnERC721Received(address(0), to, index++, _data)) {
-    //                     _revert(TransferToNonERC721ReceiverImplementer.selector);
-    //                 }
-    //             } while (index < end);
-    //             // Reentrancy protection.
-    //             if (_currentIndex != end) _revert(bytes4(0));
-    //         }
-    //     }
-    // }
-
-    /**
-     * @dev Equivalent to `_safeMint(to, quantity, '')`.
-     */
-    // TODO
-    // function _safeMint(address to, uint256 quantity) internal virtual {
-    //     _safeMint(to, quantity, '');
-    // }
 
     // =============================================================
     //                       APPROVAL OPERATIONS
@@ -955,84 +878,9 @@ contract ERC721S is IERC721A {
         emit Approval(owner, to, tokenId);
     }
 
-    // =============================================================
-    //                        BURN OPERATIONS
-    // =============================================================
-
-    /**
-     * @dev Equivalent to `_burn(tokenId, false)`.
-     */
-    // function _burn(uint256 tokenId) internal virtual {
-    //     _burn(tokenId, false);
-    // }
-
-    /**
-     * @dev destroys `tokenid`.
-     * the approval is cleared when the token is burned.
-     *
-     * requirements:
-     *
-     * - `tokenid` must exist.
-     *
-     * emits a {transfer} event.
-     */
 
     // =============================================================
     //                     EXTRA DATA OPERATIONS
-    // =============================================================
-
-    /**
-     * @dev Directly sets the extra data for the ownership data `index`.
-     */
-    // TODO
-    // function _setExtraDataAt(uint256 index, uint24 extraData) internal virtual {
-    //     uint256 packed = _packedOwnerships[index];
-    //     if (packed == 0) _revert(OwnershipNotInitializedForExtraData.selector);
-    //     uint256 extraDataCasted;
-    //     // Cast `extraData` with assembly to avoid redundant masking.
-    //     assembly {
-    //         extraDataCasted := extraData
-    //     }
-    //     packed = (packed & _BITMASK_EXTRA_DATA_COMPLEMENT) | (extraDataCasted << _BITPOS_EXTRA_DATA);
-    //     _packedOwnerships[index] = packed;
-    // }
-
-    /**
-     * @dev Called during each token transfer to set the 24bit `extraData` field.
-     * Intended to be overridden by the cosumer contract.
-     *
-     * `previousExtraData` - the value of `extraData` before transfer.
-     *
-     * Calling conditions:
-     *
-     * - When `from` and `to` are both non-zero, `from`'s `tokenId` will be
-     * transferred to `to`.
-     * - When `from` is zero, `tokenId` will be minted for `to`.
-     * - When `to` is zero, `tokenId` will be burned by `from`.
-     * - `from` and `to` are never both zero.
-     */
-    function _extraData(
-        address from,
-        address to,
-        uint24 previousExtraData
-    ) internal view virtual returns (uint24) {}
-
-    /**
-     * @dev Returns the next extra data for the packed ownership data.
-     * The returned result is shifted into position.
-     */
-    // TODO
-    // function _nextExtraData(
-    //     address from,
-    //     address to,
-    //     uint256 prevOwnershipPacked
-    // ) private view returns (uint256) {
-    //     uint24 extraData = uint24(prevOwnershipPacked >> _BITPOS_EXTRA_DATA);
-    //     return uint256(_extraData(from, to, extraData)) << _BITPOS_EXTRA_DATA;
-    // }
-
-    // =============================================================
-    //                       OTHER OPERATIONS
     // =============================================================
 
     /**
