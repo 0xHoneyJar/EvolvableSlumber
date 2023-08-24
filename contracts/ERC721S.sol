@@ -21,6 +21,8 @@ struct Config {
 }
 
 error WrongContractStakingConfig();
+error WrongStakingTime();
+error TokenStaked();
 
 /**
  * @title ERC721S
@@ -84,8 +86,7 @@ contract ERC721S is IERC721A {
         // `keccak256(bytes("Transfer(address,address,uint256)"))`.
         bytes32 private constant _TRANSFER_EVENT_SIGNATURE =
             0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef;
-
-
+    
 
     // =============================================================
     //                            STORAGE
@@ -341,14 +342,15 @@ contract ERC721S is IERC721A {
      *   if `_config.automaticStakeTimeOnMint == 0`.
      */
     function _packStakingDataForMint(address owner) private view returns (uint256 result) {
-        bytes4 wrongStakingConfigSelector = WrongContractStakingConfig.selector;
+        // TODO Calc this as a contract constant to reduce some gas.
+        bytes4 _WRONG_STAKING_CONFIG_ERROR_SELECTOR = WrongContractStakingConfig.selector;
         assembly {
             let conf := sload(_config.slot)
 
             // If the token shouldn't get staked on tx, revert.
             let onMintStakingTime := and(shr(128, conf), _BITMASK_STAKING_INFO)
             if iszero(onMintStakingTime) {
-                mstore(0x00, wrongStakingConfigSelector)
+                mstore(0x00, _WRONG_STAKING_CONFIG_ERROR_SELECTOR)
                 revert(0x00, 0x04)
             }
             // Otherwise, set that staking time.
@@ -365,40 +367,68 @@ contract ERC721S is IERC721A {
     }
 
     /**
-     * @notice It assumes the token is unstaked.
+     * Requirements:
+     *
+     * - The token must be unstaked.
      */
     function _packOwnershipDataForTx(address newOwner, uint256 oldOwnership) private view returns (uint256 result) {
+        // TODO Calc this as a contract constant to reduce some gas.
+        bytes4 _TOKEN_STAKED_ERROR_SELECTOR = TokenStaked.selector;
         assembly {
+
+            let conf := sload(_config.slot)
+            let deploymentTime := and(conf, _BITMASK_STAKING_INFO)
 
             // SET STAKING DURATION IF THE TOKEN SHOULD GET STAKED ON TX.
             { 
-                let conf := sload(_config.slot)
                 let stakingDurationOnTx := and(shr(160, conf), _BITMASK_STAKING_INFO)
                 // If the token should get staked on tx, set that staking data into the result.
                 if not(iszero(stakingDurationOnTx)) {
                     // Calc relative staking start to the deployment time.
-                    let stakingStart := sub(timestamp(), and(conf, _BITMASK_STAKING_INFO))
+                    let newRelativeStakingStart := sub(timestamp(), deploymentTime)
                     // Concat the staking start to the total time the token is gonna be staked.
                     result := or(
                         shl(_BITPOS_STAKING_DURATION, stakingDurationOnTx),
-                        shl(_BITPOS_STAKING_START, stakingStart)
+                        shl(_BITPOS_STAKING_START, newRelativeStakingStart)
                     )
                 }
+            }
+
+            let oldStakingDuration := and(shr(_BITPOS_STAKING_DURATION, oldOwnership), _BITMASK_STAKING_INFO)
+
+            // REVERT IF THE TOKEN IS STAKED.
+            {
+                // If the old staking staking duration is 0, that means that the token was 
+                // not staked, or that that it was already unstaked.
+                if not(iszero(oldStakingDuration)) {
+                    // Calc the staking start based on the deployment time and the relative staking start.
+                    let oldRelativeStakingStart := and(shr(_BITPOS_STAKING_START, oldOwnership), _BITMASK_STAKING_INFO)
+                    let oldStakingStart := and(deploymentTime, oldRelativeStakingStart)
+                    // If the staking end time is greater than the current block timestamp, revert.
+                    if gt(add(oldStakingStart, oldStakingDuration), timestamp()) {
+                        mstore(0x00, _TOKEN_STAKED_ERROR_SELECTOR)
+                        revert(0x00, 0x04)
+                    }
+                }
+                
             }
 
             // UPDATE THE TOTAL TIME STAKED BASED ON THE LAST STAKE.
             {
                 let totalTimeStaked := and(shr(_BITPOS_TOTAL_STAKED_TIME, oldOwnership), _BITMASK_STAKING_INFO)
+
                 // Wont overflow in the next ~136 years.
+                // Will be redudant if the token was already unstaked or never staked, 
+                // in which case, `oldStakingDuraion == 0`.
                 totalTimeStaked := add(
                     totalTimeStaked,
-                    and(shr(_BITPOS_STAKING_DURATION, oldOwnership), _BITMASK_STAKING_INFO)
+                    oldStakingDuration
                 )
 
                 // Append the new owner and the total time staked to the result.
                 result := or(result, or(
                     shl(_BITPOS_TOTAL_STAKED_TIME, totalTimeStaked),
-                    newOwner
+                    and(newOwner, _BITMASK_ADDRESS)
                 ))
             }
 
@@ -406,13 +436,19 @@ contract ERC721S is IERC721A {
     }
 
     /**
-     * @notice It assumes that the token is unstaked and that `tokenId` owner agreed to this operation.
+     * Requirements:
+     *
+     * - The token is unstaked (TODO, we already read `_config` from the procedure, so we
+     *   can save some gas by doing this check here, instead of externally).
      */
-    function _updateOwnershipDataForStaking2(uint256 oldOwnership, uint32 time) private view returns (uint256) {
+    function _updateOwnershipDataForStaking(uint256 oldOwnership, uint32 time) private view returns (uint256) {
+        // TODO Calc this as a contract constant to reduce some gas.
+        bytes4 _WRONG_STAKING_TIME_ERROR_SELECTOR = WrongStakingTime.selector;
         assembly {
             // Revert if `time` is less than the min staking time.
             if lt(time, and(shr(96, sload(_config.slot)), _BITMASK_STAKING_INFO)) {
-                revert(0,0) 
+                mstore(0x00, _WRONG_STAKING_TIME_ERROR_SELECTOR)
+                revert(0x00, 0x04)
             }
 
             // Update total time staked based on the last stake.
@@ -549,6 +585,7 @@ contract ERC721S is IERC721A {
      * - `from` cannot be the zero address.
      * - `to` cannot be the zero address.
      * - `tokenId` token must be owned by `from`.
+     * - `tokenId` can't be staked.
      * - If the caller is not `from`, it must be approved to move this token
      * by either {approve} or {setApprovalForAll}.
      *
@@ -560,77 +597,67 @@ contract ERC721S is IERC721A {
         address to,
         uint256 tokenId
     ) public payable virtual override {
-        //uint256 prevOwnershipPacked = _packedOwnershipOf(tokenId);
+        uint256 prevOwnershipPacked = _packedOwnershipOf(tokenId);
 
-        //// Mask `from` to the lower 160 bits, in case the upper bits somehow aren't clean.
-        //from = address(uint160(uint256(uint160(from)) & _BITMASK_ADDRESS));
+        // Mask `from` to the lower 160 bits, in case the upper bits somehow aren't clean.
+        from = address(uint160(uint256(uint160(from)) & _BITMASK_ADDRESS));
 
-        //if (address(uint160(prevOwnershipPacked)) != from) _revert(TransferFromIncorrectOwner.selector);
+        if (address(uint160(prevOwnershipPacked)) != from) _revert(TransferFromIncorrectOwner.selector);
 
-        //(uint256 approvedAddressSlot, address approvedAddress) = _getApprovedSlotAndAddress(tokenId);
+        (uint256 approvedAddressSlot, address approvedAddress) = _getApprovedSlotAndAddress(tokenId);
 
-        //// The nested ifs save around 20+ gas over a compound boolean condition.
-        //if (!_isSenderApprovedOrOwner(approvedAddress, from, _msgSenderERC721A()))
-        //    if (!isApprovedForAll(from, _msgSenderERC721A())) _revert(TransferCallerNotOwnerNorApproved.selector);
+        // The nested ifs save around 20+ gas over a compound boolean condition.
+        if (!_isSenderApprovedOrOwner(approvedAddress, from, _msgSenderERC721A()))
+            if (!isApprovedForAll(from, _msgSenderERC721A())) 
+                _revert(TransferCallerNotOwnerNorApproved.selector);
 
-        //_beforeTokenTransfers(from, to, tokenId, 1);
+        _beforeTokenTransfers(from, to, tokenId, 1);
 
-        //// Clear approvals from the previous owner.
-        //assembly {
-        //    if approvedAddress {
-        //        // This is equivalent to `delete _tokenApprovals[tokenId]`.
-        //        sstore(approvedAddressSlot, 0)
-        //    }
-        //}
+        // Clear approvals from the previous owner.
+        assembly {
+            if approvedAddress {
+                // This is equivalent to `delete _tokenApprovals[tokenId]`.
+                sstore(approvedAddressSlot, 0)
+            }
+        }
 
-        //// Underflow of the sender's balance is impossible because we check for
-        //// ownership above and the recipient's balance can't realistically overflow.
-        //// Counter overflow is incredibly unrealistic as `tokenId` would have to be 2**256.
-        //unchecked {
-        //    // We can directly increment and decrement the balances.
-        //    --_packedAddressData[from]; // Updates: `balance -= 1`.
-        //    ++_packedAddressData[to]; // Updates: `balance += 1`.
+        // Underflow of the sender's balance is impossible because we check for
+        // ownership above and the recipient's balance can't realistically overflow.
+        // Counter overflow is incredibly unrealistic as `tokenId` would have to be 2**256.
+        unchecked {
+            // We can directly increment and decrement the balances.
+            --_packedAddressData[from]; // Updates: `balance -= 1`.
+            ++_packedAddressData[to]; // Updates: `balance += 1`.
 
-        //    // Updates:
-        //    // - `address` to the next owner.
-        //    // - `startTimestamp` to the timestamp of transfering.
-        //    // - `burned` to `false`.
-        //    // - `nextInitialized` to `true`.
-        //    _packedOwnerships[tokenId] = _packOwnershipData(
-        //        to,
-        //        _BITMASK_NEXT_INITIALIZED | _nextExtraData(from, to, prevOwnershipPacked)
-        //    );
+            // Calc new ownership, revert if the token is staked.
+            _packedOwnerships[tokenId] = _packOwnershipDataForTx(to, prevOwnershipPacked);
 
-        //    // If the next slot may not have been initialized (i.e. `nextInitialized == false`) .
-        //    if (prevOwnershipPacked & _BITMASK_NEXT_INITIALIZED == 0) {
-        //        uint256 nextTokenId = tokenId + 1;
-        //        // If the next slot's address is zero and not burned (i.e. packed value is zero).
-        //        if (_packedOwnerships[nextTokenId] == 0) {
-        //            // If the next slot is within bounds.
-        //            if (nextTokenId != _currentIndex) {
-        //                // Initialize the next slot to maintain correctness for `ownerOf(tokenId + 1)`.
-        //                _packedOwnerships[nextTokenId] = prevOwnershipPacked;
-        //            }
-        //        }
-        //    }
-        //}
+            // Load next ownership slot and update it if needed.
+            uint256 nextOwnership = _packedOwnerships[tokenId + 1];
+            if (tokenId + 1 < _currentIndex && nextOwnership == 0) {
+                _packedOwnerships[tokenId + 1] = prevOwnershipPacked;
+            }
 
-        //// Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
-        //uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
-        //assembly {
-        //    // Emit the `Transfer` event.
-        //    log4(
-        //        0, // Start of data (0, since no data).
-        //        0, // End of data (0, since no data).
-        //        _TRANSFER_EVENT_SIGNATURE, // Signature.
-        //        from, // `from`.
-        //        toMasked, // `to`.
-        //        tokenId // `tokenId`.
-        //    )
-        //}
-        //if (toMasked == 0) _revert(TransferToZeroAddress.selector);
+        }
 
-        //_afterTokenTransfers(from, to, tokenId, 1);
+        // Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
+        uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
+        assembly {
+            // Emit the `Transfer` event.
+            log4(
+                0, // Start of data (0, since no data).
+                0, // End of data (0, since no data).
+                _TRANSFER_EVENT_SIGNATURE, // Signature.
+                from, // `from`.
+                toMasked, // `to`.
+                tokenId // `tokenId`.
+            ) 
+
+            // TODO Emit the 'TokenStaked' event if it was.
+        }
+        if (toMasked == 0) _revert(TransferToZeroAddress.selector);
+
+        _afterTokenTransfers(from, to, tokenId, 1);
     }
 
     /**
@@ -783,10 +810,16 @@ contract ERC721S is IERC721A {
         _beforeTokenTransfers(address(0), to, startTokenId, quantity);
 
         unchecked {
+            // Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
+            uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
+            if (toMasked == 0) _revert(MintToZeroAddress.selector);
+
             if (stake)
+                // Will revert if `stake` but the config for staking on mint is wrong.
                 _packedOwnerships[startTokenId] = _packStakingDataForMint(to);
             else 
-                _packedOwnerships[startTokenId] = uint160(to);
+                // Otherwise, just store the new owner address.
+                _packedOwnerships[startTokenId] = toMasked;
 
             // Updates:
             // - `balance += quantity`.
@@ -795,15 +828,27 @@ contract ERC721S is IERC721A {
             // We can directly add to the `balance` and `numberMinted`.
             _packedAddressData[to] += quantity * ((1 << _BITPOS_NUMBER_MINTED) | 1);
 
-            // Mask `to` to the lower 160 bits, in case the upper bits somehow aren't clean.
-            uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
-
-            if (toMasked == 0) _revert(MintToZeroAddress.selector);
-
             uint256 end = startTokenId + quantity;
-            uint256 tokenId = startTokenId;
+            uint256 tokenId;
 
+            // If staking on mint is enabled for this batch, emit 
+            // a staked event for each tokenId.
+            if (stake) {
+                tokenId = startTokenId;
+                do {
+                    assembly {
+                        // TODO Use Openseas staking standard.
+                        // logN(
+                        //     0,
+                        //     0,
+                        //     _STAKE_EVENT_SIGNATURE,
+                        //     etc
+                        // )
+                    }
+                } while (++tokenId != end);
+            }
 
+            tokenId = startTokenId;
             do {
                 assembly {
                     // Emit the `Transfer` event.
@@ -815,18 +860,6 @@ contract ERC721S is IERC721A {
                         toMasked, // `to`.
                         tokenId // `tokenId`.
                     )
-
-                    if not(iszero(stake)) {
-                        // TODO Use Openseas staking standard.
-                        // TODO Optimize gas: you shouldn't need to check 
-                        // this conditionfor every lo0p.
-                        // log4(
-                        //     0,
-                        //     0,
-                        //     _STAKE_EVENT_SIGNATURE,
-                        //     etc
-                        // )
-                    }
                 }
                 // The `!=` check ensures that large values of `quantity`
                 // that overflows uint256 will make the loop run out of gas.
