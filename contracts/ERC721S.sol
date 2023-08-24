@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Based on ERC721A Implementation.
 
-pragma solidity ^0.8.10;
+pragma solidity ^0.8.18;
 
 import './interfaces/IERC721A.sol';
 
@@ -441,7 +441,7 @@ contract ERC721S is IERC721A {
      *
      * - The token must be unstaked.
      */
-    function _updateOwnershipDataForStaking(uint256 oldOwnership, uint32 time) private view returns (uint256) {
+    function _updateOwnershipDataForStaking(uint256 oldOwnership, uint32 time) private view returns (uint256 result) {
         // TODO Calc this as a contract constant to reduce some gas.
         bytes4 _WRONG_STAKING_TIME_ERROR_SELECTOR = WrongStakingTime.selector;
 
@@ -462,8 +462,8 @@ contract ERC721S is IERC721A {
 
             // REVERT IF THE TOKEN IS STAKED.
             {
-                // If the old staking staking duration is 0, that means that the token was 
-                // not staked, or that that it was already unstaked.
+                // If the old staking duration is 0, that means that the token was 
+                // not staked, or that it was already unstaked.
                 if not(iszero(oldStakingDuration)) {
                     // Calc the staking start based on the deployment time and the relative staking start.
                     let oldRelativeStakingStart := and(shr(_BITPOS_STAKING_START, oldOwnership), _BITMASK_STAKING_INFO)
@@ -479,28 +479,25 @@ contract ERC721S is IERC721A {
 
             // PACK ALL STAKING DATA.
             {
-                // Update total time staked based on the last stake.
-                let totalTimeStaked := and(shr(_BITPOS_TOTAL_STAKED_TIME, oldOwnership), _BITMASK_STAKING_INFO)
-                // Wont overflow in the next ~136 years.
-                totalTimeStaked := add(totalTimeStaked, oldStakingDuration)
-
                 // Clean all ownership data other than the owner.
-                oldOwnership := and(oldOwnership, _BITMASK_ADDRESS)
+                result := and(oldOwnership, _BITMASK_ADDRESS)
 
                 // Concat result to the staking duration.
-                oldOwnership := or(oldOwnership, shl(_BITPOS_STAKING_DURATION, time))
+                result := or(result, shl(_BITPOS_STAKING_DURATION, time))
 
                 // Calc relative staking start to the deployment time.
                 let stakingStart := sub(timestamp(), time)
                 // Concat result to the staking start.
-                oldOwnership := or(oldOwnership, shl(_BITPOS_STAKING_START, stakingStart))
+                result := or(result, shl(_BITPOS_STAKING_START, stakingStart))
 
+                // Update total time staked based on the last stake.
+                let totalTimeStaked := and(shr(_BITPOS_TOTAL_STAKED_TIME, oldOwnership), _BITMASK_STAKING_INFO)
+                // Wont overflow in the next ~136 years.
+                totalTimeStaked := add(totalTimeStaked, oldStakingDuration)
                 // Concat result to the total time staked.
-                oldOwnership := or(oldOwnership, shr(_BITPOS_TOTAL_STAKED_TIME, totalTimeStaked))
-
-                // Return result.
-                return(oldOwnership, 0x20)
+                result := or(result, shr(_BITPOS_TOTAL_STAKED_TIME, totalTimeStaked))
             }
+
 
         }
     }
@@ -830,7 +827,7 @@ contract ERC721S is IERC721A {
     function _mint(
         address to,
         uint256 quantity,
-        bool stake
+        bool stakeOnMint
     ) internal virtual {
         uint256 startTokenId = _currentIndex;
         if (quantity == 0) _revert(MintZeroQuantity.selector);
@@ -842,7 +839,7 @@ contract ERC721S is IERC721A {
             uint256 toMasked = uint256(uint160(to)) & _BITMASK_ADDRESS;
             if (toMasked == 0) _revert(MintToZeroAddress.selector);
 
-            if (stake)
+            if (stakeOnMint)
                 // Will revert if `stake` but the config for staking on mint is wrong.
                 _packedOwnerships[startTokenId] = _packStakingDataForMint(to);
             else 
@@ -861,7 +858,7 @@ contract ERC721S is IERC721A {
 
             // If staking on mint is enabled for this batch, emit 
             // a staked event for each tokenId.
-            if (stake) {
+            if (stakeOnMint) {
                 tokenId = startTokenId;
                 do {
                     assembly {
@@ -943,28 +940,12 @@ contract ERC721S is IERC721A {
     //                       STAKING OPERATIONS 
     // =============================================================
     /**
-     * @dev Let `owns := _packedOwnerships`. 
-     * Then, this function will stake all ownerships in
-     *
-     *     `[owns[tokenId], owns[tokenId + 1], ..., owns[tokenId + n]`
-     *
-     * Such that every ownership other than the `tokenId` ownership is not set.
-     * Which means that all this tokens range will be owned by the token owner
-     * of the first `owns[tokenId]`.
-     *
-     * Formally: 
-     *  
-     *     `owns[tokenId + i] == 0`
-     *  
-     * For all $i$ in $\{1, 2, ..., n\} and `owns[tokenId] != 0`.
-     * Note also that, by 721A definition, $n$ will be implicit, which
-     * will let us stake $n$ tokens in $O(1)$.
-     *
+     * @dev It will stake `tokenId` and all the following 
+     *      successive tokens owned by the `tokenId` owner.
      */
     function stakeBatch(uint256 tokenId, uint32 time) public {
 
-        uint256 oldOwnership = _packedOwnerships[tokenId];
-        if (oldOwnership == 0) _revert(OwnerQueryForNonexistentToken.selector);
+        uint256 oldOwnership = _packedOwnershipOf(tokenId);
 
         address msgSender = _msgSenderERC721A();
         address owner = address(uint160(oldOwnership));
@@ -980,6 +961,51 @@ contract ERC721S is IERC721A {
         // TODO Emit staking events.
     }
 
+    /**
+     * @dev It will only stake `tokenId`, doing the required ownership manipulations.
+     */
+    function stake(uint256 tokenId, uint32 time) public {
+        uint256 oldOwnership = _packedOwnershipOf(tokenId);
+
+        address msgSender = _msgSenderERC721A();
+        address owner = address(uint160(oldOwnership));
+        (, address approvedAddress) = _getApprovedSlotAndAddress(tokenId);
+
+        if (!_isSenderApprovedOrOwner(approvedAddress, owner, _msgSenderERC721A()))
+            if (!isApprovedForAll(owner, msgSender))
+                _revert(StakeCallerNotOwnerNorApproved.selector);
+
+        // Calc new ownership, revert if the token is staked.
+        _packedOwnerships[tokenId] = _updateOwnershipDataForStaking(oldOwnership, time);
+
+        uint256 nextOwnership = _packedOwnerships[tokenId + 1];
+        // Load next ownership slot and update it if needed.
+        if (tokenId + 1 < _currentIndex && nextOwnership == 0) {
+            _packedOwnerships[tokenId + 1] = oldOwnership;
+        }
+
+        // TODO Emit staking event.
+    }
+
+    /**
+     * @dev It will use both staking strategies to stake multiple tokens.
+     * @notice That those arrays args will be decided from front-end based on events.
+     */
+    function stakeBatchesAndIds(
+        uint256[] calldata batchIds,
+        uint256[] calldata ids,
+        uint32 time
+    ) public {
+        // NOTE That this procedure can be further optimized.
+        // Every time one of those functions is called, lots of
+        // redundant data gets `sload`ed again and again, like the
+        // contract `_config`.
+        uint256 i = 0;
+        for (i; i < batchIds.length; i++)
+            stakeBatch(batchIds[i], time);
+        for (i = 0; i < ids.length; i++)
+            stake(ids[i], time);
+    }
 
     // =============================================================
     //                     EXTRA DATA OPERATIONS
