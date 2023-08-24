@@ -23,6 +23,7 @@ struct Config {
 error WrongContractStakingConfig();
 error WrongStakingTime();
 error TokenStaked();
+error StakeCallerNotOwnerNorApproved();
 
 /**
  * @title ERC721S
@@ -403,7 +404,7 @@ contract ERC721S is IERC721A {
                 if not(iszero(oldStakingDuration)) {
                     // Calc the staking start based on the deployment time and the relative staking start.
                     let oldRelativeStakingStart := and(shr(_BITPOS_STAKING_START, oldOwnership), _BITMASK_STAKING_INFO)
-                    let oldStakingStart := and(deploymentTime, oldRelativeStakingStart)
+                    let oldStakingStart := add(deploymentTime, oldRelativeStakingStart)
                     // If the staking end time is greater than the current block timestamp, revert.
                     if gt(add(oldStakingStart, oldStakingDuration), timestamp()) {
                         mstore(0x00, _TOKEN_STAKED_ERROR_SELECTOR)
@@ -438,41 +439,69 @@ contract ERC721S is IERC721A {
     /**
      * Requirements:
      *
-     * - The token is unstaked (TODO, we already read `_config` from the procedure, so we
-     *   can save some gas by doing this check here, instead of externally).
+     * - The token must be unstaked.
      */
     function _updateOwnershipDataForStaking(uint256 oldOwnership, uint32 time) private view returns (uint256) {
         // TODO Calc this as a contract constant to reduce some gas.
         bytes4 _WRONG_STAKING_TIME_ERROR_SELECTOR = WrongStakingTime.selector;
+
+        // TODO Calc this as a contract constant to reduce some gas.
+        bytes4 _TOKEN_STAKED_ERROR_SELECTOR = TokenStaked.selector;
+
         assembly {
+            let conf := sload(_config.slot)
+            let deploymentTime := and(conf, _BITMASK_STAKING_INFO)
+
             // Revert if `time` is less than the min staking time.
-            if lt(time, and(shr(96, sload(_config.slot)), _BITMASK_STAKING_INFO)) {
+            if lt(time, and(shr(96, conf), _BITMASK_STAKING_INFO)) {
                 mstore(0x00, _WRONG_STAKING_TIME_ERROR_SELECTOR)
                 revert(0x00, 0x04)
             }
 
-            // Update total time staked based on the last stake.
-            let totalTimeStaked := and(shr(_BITPOS_TOTAL_STAKED_TIME, oldOwnership), _BITMASK_STAKING_INFO)
-            // Wont overflow in the next ~136 years.
-            totalTimeStaked := add(
-                totalTimeStaked, 
-                and(shr(_BITPOS_STAKING_DURATION, oldOwnership), _BITMASK_STAKING_INFO)
-            )
+            let oldStakingDuration := and(shr(_BITPOS_STAKING_DURATION, oldOwnership), _BITMASK_STAKING_INFO)
 
-            // Calc relative staking start to the deployment time.
-            let stakingStart := sub(timestamp(), time)
+            // REVERT IF THE TOKEN IS STAKED.
+            {
+                // If the old staking staking duration is 0, that means that the token was 
+                // not staked, or that that it was already unstaked.
+                if not(iszero(oldStakingDuration)) {
+                    // Calc the staking start based on the deployment time and the relative staking start.
+                    let oldRelativeStakingStart := and(shr(_BITPOS_STAKING_START, oldOwnership), _BITMASK_STAKING_INFO)
+                    let oldStakingStart := add(deploymentTime, oldRelativeStakingStart)
+                    // If the staking end time is greater than the current block timestamp, revert.
+                    if gt(add(oldStakingStart, oldStakingDuration), timestamp()) {
+                        mstore(0x00, _TOKEN_STAKED_ERROR_SELECTOR)
+                        revert(0x00, 0x04)
+                    }
+                }
+                
+            }
 
-            // Concat owner with new total time staked, the staking start relative to 
-            // the deployment time and the total time the token will be staked.
-            oldOwnership := and(oldOwnership, _BITMASK_ADDRESS)
-            oldOwnership := or(
-                oldOwnership,
-                or(shl(_BITPOS_STAKING_DURATION, time), or(
-                    shr(_BITPOS_STAKING_START, stakingStart),
-                    shr(_BITPOS_TOTAL_STAKED_TIME, totalTimeStaked)
-                ))
-            )
-            return(oldOwnership, 0x20)
+            // PACK ALL STAKING DATA.
+            {
+                // Update total time staked based on the last stake.
+                let totalTimeStaked := and(shr(_BITPOS_TOTAL_STAKED_TIME, oldOwnership), _BITMASK_STAKING_INFO)
+                // Wont overflow in the next ~136 years.
+                totalTimeStaked := add(totalTimeStaked, oldStakingDuration)
+
+                // Clean all ownership data other than the owner.
+                oldOwnership := and(oldOwnership, _BITMASK_ADDRESS)
+
+                // Concat result to the staking duration.
+                oldOwnership := or(oldOwnership, shl(_BITPOS_STAKING_DURATION, time))
+
+                // Calc relative staking start to the deployment time.
+                let stakingStart := sub(timestamp(), time)
+                // Concat result to the staking start.
+                oldOwnership := or(oldOwnership, shl(_BITPOS_STAKING_START, stakingStart))
+
+                // Concat result to the total time staked.
+                oldOwnership := or(oldOwnership, shr(_BITPOS_TOTAL_STAKED_TIME, totalTimeStaked))
+
+                // Return result.
+                return(oldOwnership, 0x20)
+            }
+
         }
     }
 
@@ -591,7 +620,6 @@ contract ERC721S is IERC721A {
      *
      * Emits a {Transfer} event.
      */
-    // TODO
     function transferFrom(
         address from,
         address to,
@@ -909,6 +937,47 @@ contract ERC721S is IERC721A {
 
         _tokenApprovals[tokenId].value = to;
         emit Approval(owner, to, tokenId);
+    }
+
+    // =============================================================
+    //                       STAKING OPERATIONS 
+    // =============================================================
+    /**
+     * @dev Let `owns := _packedOwnerships`. 
+     * Then, this function will stake all ownerships in
+     *
+     *     `[owns[tokenId], owns[tokenId + 1], ..., owns[tokenId + n]`
+     *
+     * Such that every ownership other than the `tokenId` ownership is not set.
+     * Which means that all this tokens range will be owned by the token owner
+     * of the first `owns[tokenId]`.
+     *
+     * Formally: 
+     *  
+     *     `owns[tokenId + i] == 0`
+     *  
+     * For all $i$ in $\{1, 2, ..., n\} and `owns[tokenId] != 0`.
+     * Note also that, by 721A definition, $n$ will be implicit, which
+     * will let us stake $n$ tokens in $O(1)$.
+     *
+     */
+    function stakeBatch(uint256 tokenId, uint32 time) public {
+
+        uint256 oldOwnership = _packedOwnerships[tokenId];
+        if (oldOwnership == 0) _revert(OwnerQueryForNonexistentToken.selector);
+
+        address msgSender = _msgSenderERC721A();
+        address owner = address(uint160(oldOwnership));
+        (, address approvedAddress) = _getApprovedSlotAndAddress(tokenId);
+
+        if (!_isSenderApprovedOrOwner(approvedAddress, owner, _msgSenderERC721A()))
+            if (!isApprovedForAll(owner, msgSender))
+                _revert(StakeCallerNotOwnerNorApproved.selector);
+
+        // Reverts if `time < _config.minStakingTime`.
+        _packedOwnerships[tokenId] = _updateOwnershipDataForStaking(oldOwnership, time);
+
+        // TODO Emit staking events.
     }
 
 
