@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Based on ERC721A Implementation.
 
-pragma solidity ^0.8.18;
+pragma solidity ^0.8.10;
 
 import './interfaces/IERC721A.sol';
+import './interfaces/IERC721Receiver.sol';
 
 struct Config {
     // Enough for the next ~80 years.
     uint32 deployTime;
     // Max price before overflow: 18.4 eth.
+    // TODO This shouldn't be handled in here, but by a inherited impl contract.
     uint64 price;
     // Enough to stake for a lifetime.
     uint32 minStakingTime;
@@ -17,6 +19,16 @@ struct Config {
     // Enough to stake for a lifetime.
     uint32 automaticStakeTimeOnTx;
     // Will be saved in the next slot.
+    // TODO This shouldn't be handled in here, but by a inherited impl contract.
+    string baseUri;
+}
+
+// @dev Used for constructor, because `deployTime` should be set automatically.
+struct DeploymentConfig {
+    uint64 price;
+    uint32 minStakingTime;
+    uint32 automaticStakeTimeOnMint;
+    uint32 automaticStakeTimeOnTx;
     string baseUri;
 }
 
@@ -87,6 +99,8 @@ contract ERC721S is IERC721A {
         // `keccak256(bytes("Transfer(address,address,uint256)"))`.
         bytes32 private constant _TRANSFER_EVENT_SIGNATURE =
             0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef;
+
+        uint256 private constant _BITMASK64 = (1 << 64) - 1;
     
 
     // =============================================================
@@ -138,11 +152,30 @@ contract ERC721S is IERC721A {
     constructor(
         string memory name_,
         string memory symbol_,
-        Config memory config_ 
+        DeploymentConfig memory config_ 
     ) {
+        // TODO Refactor and add to the contract config struct.
         _name = name_;
         _symbol = symbol_;
-        _config = config_;
+
+        // Pack the first `_config` word.
+        assembly {
+            let deployTime := timestamp()
+            let price := and(mload(config_), _BITMASK64)
+            let minStakingTime := and(mload(add(config_, 0x20)), _BITMASK_STAKING_INFO)
+            let mintStakingTime := and(mload(add(config_, 0x40)), _BITMASK_STAKING_INFO)
+            let txStakingTime := and(mload(add(config_, 0x60)), _BITMASK_STAKING_INFO)
+
+            let fstWord := or(deployTime, shl(32, price))
+            fstWord := or(fstWord, shl(96, minStakingTime))
+            fstWord := or(fstWord, shl(128, mintStakingTime))
+            fstWord := or(fstWord, shl(160, txStakingTime))
+            sstore(_config.slot, fstWord)
+        }
+
+        // Pack the `baseUri`.
+        _config.baseUri = config_.baseUri;
+
         _currentIndex = _startTokenId();
     }
 
@@ -711,18 +744,16 @@ contract ERC721S is IERC721A {
      *
      * Emits a {Transfer} event.
      */
-    // TODO
     function safeTransferFrom(
         address from,
         address to,
         uint256 tokenId,
         bytes memory _data
     ) public payable virtual override {
-        //transferFrom(from, to, tokenId);
-        //if (to.code.length != 0)
-        //    if (!_checkContractOnERC721Received(from, to, tokenId, _data)) {
-        //        _revert(TransferToNonERC721ReceiverImplementer.selector);
-        //    }
+        transferFrom(from, to, tokenId);
+        if (to.code.length != 0)
+            if (!_checkContractOnERC721Received(from, to, tokenId, _data))
+                _revert(TransferToNonERC721ReceiverImplementer.selector);
     }
 
     /**
@@ -781,26 +812,25 @@ contract ERC721S is IERC721A {
      *
      * Returns whether the call correctly returned the expected magic value.
      */
-    // TODO
-    //function _checkContractOnERC721Received(
-    //    address from,
-    //    address to,
-    //    uint256 tokenId,
-    //    bytes memory _data
-    //) private returns (bool) {
-    //    try ERC721A__IERC721Receiver(to).onERC721Received(_msgSenderERC721A(), from, tokenId, _data) returns (
-    //        bytes4 retval
-    //    ) {
-    //        return retval == ERC721A__IERC721Receiver(to).onERC721Received.selector;
-    //    } catch (bytes memory reason) {
-    //        if (reason.length == 0) {
-    //            _revert(TransferToNonERC721ReceiverImplementer.selector);
-    //        }
-    //        assembly {
-    //            revert(add(32, reason), mload(reason))
-    //        }
-    //    }
-    //}
+    function _checkContractOnERC721Received(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) private returns (bool) {
+        try IERC721Receiver(to).onERC721Received(
+            _msgSenderERC721A(), from, tokenId, _data
+        ) returns (bytes4 retval) {
+            return retval == IERC721Receiver(to).onERC721Received.selector;
+        } catch (bytes memory reason) {
+            if (reason.length == 0) {
+                _revert(TransferToNonERC721ReceiverImplementer.selector);
+            }
+            assembly {
+                revert(add(32, reason), mload(reason))
+            }
+        }
+    }
 
     // =============================================================
     //                        MINT OPERATIONS

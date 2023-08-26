@@ -17,3 +17,4 @@ export const getRandomFundedAccount = async (funds: number = 10) => {
     await admin.sendTransaction({to: acc.address, value: toWei(funds)})
     return acc
 };
+
