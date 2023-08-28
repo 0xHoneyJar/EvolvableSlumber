@@ -1,5 +1,7 @@
 import { ethers } from "hardhat";
 import { BigNumber } from 'ethers'
+import { pipe } from "fp-ts/lib/function";
+import { ERC721S, MinimalErc721SImpl } from "../typechain-types";
 
 export const toWei = (x: number) => ethers.utils.parseUnits(x.toString(), 'ether')
 export const fromWei = (x: BigNumber) => ethers.utils.formatEther(x)
@@ -19,4 +21,15 @@ export const getRandomFundedAccount = async (funds: number = 10) => {
 };
 
 export const sleep = (s: number) => new Promise(resolve => setTimeout(resolve, s*1000)); 
+
+/**
+ * @returns A number in the inclsusive range `range` following an
+ * exponential distribution of parameter `lambda`.
+ */
+export const randExpRange = (lambda: number, range: [number, number]) => pipe(
+    Math.random(),
+    r => - Math.log(1 - r) / lambda + range[0],
+    Math.floor,
+    n => Math.min(n, range[1])
+)
 
