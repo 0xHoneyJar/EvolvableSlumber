@@ -9,10 +9,8 @@ pragma solidity ^0.8.10;
 contract MinimalErc721SImpl is ERC721S, Ownable {
 
     constructor(
-        string memory name_,
-        string memory symbol_,
         DeploymentConfig memory config_ 
-    ) ERC721S(name_, symbol_, config_) { }
+    ) ERC721S(config_) { }
 
     function mintAndStake(address to, uint256 quantity) public onlyOwner {
         _mint(to, quantity);
@@ -26,5 +24,17 @@ contract MinimalErc721SImpl is ERC721S, Ownable {
         return 1; 
     }
 
+    // INTERNAL TESTING FUNCTIONS.
+    function packStakingDataForMint(address owner) public view returns (uint256 result) {
+        return _packStakingDataForMint(owner); 
+    }
+
+    function packOwnershipDataForTx(address newOwner, uint256 oldOwnership) public view returns (uint256 result) {
+        return _packOwnershipDataForTx(newOwner, oldOwnership);
+    }
+
+    function updateOwnershipDataForStaking(uint256 oldOwnership, uint32 time) public view returns (uint256 result) {
+        return _updateOwnershipDataForStaking(oldOwnership, time);
+    }
 
 }

@@ -18,3 +18,5 @@ export const getRandomFundedAccount = async (funds: number = 10) => {
     return acc
 };
 
+export const sleep = (s: number) => new Promise(resolve => setTimeout(resolve, s*1000)); 
+

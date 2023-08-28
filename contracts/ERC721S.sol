@@ -9,32 +9,25 @@ import './interfaces/IERC721Receiver.sol';
 struct Config {
     // Enough for the next ~80 years.
     uint32 deployTime;
-    // Max price before overflow: 18.4 eth.
-    // TODO This shouldn't be handled in here, but by a inherited impl contract.
-    uint64 price;
     // Enough to stake for a lifetime.
     uint32 minStakingTime;
     // Enough to stake for a lifetime.
     uint32 automaticStakeTimeOnMint;
     // Enough to stake for a lifetime.
     uint32 automaticStakeTimeOnTx;
-    // Will be saved in the next slot.
-    // TODO This shouldn't be handled in here, but by a inherited impl contract.
-    string baseUri;
+    string name;
+    string symbol;
 }
 
 // @dev Used for constructor, because `deployTime` should be set automatically.
 struct DeploymentConfig {
-    uint64 price;
     uint32 minStakingTime;
     uint32 automaticStakeTimeOnMint;
     uint32 automaticStakeTimeOnTx;
-    string baseUri;
+    string name;
+    string symbol;
 }
 
-error WrongContractStakingConfig();
-error WrongStakingTime();
-error TokenStaked();
 error StakeCallerNotOwnerNorApproved();
 
 /**
@@ -59,6 +52,10 @@ contract ERC721S is IERC721A {
     //                           CONSTANTS
     // =============================================================
 
+    // Config bit positions.
+        uint256 private constant _BITPOS_MIN_STAKING_TIME = 32;
+        uint256 private constant _BITPOS_STAKING_TIME_ON_MINT = 64;
+        uint256 private constant _BITPOS_STAKING_TIME_ON_TX = 96;
 
     // Address data masks and bit positions.
 
@@ -73,7 +70,6 @@ contract ERC721S is IERC721A {
 
         // Mask of all 256 bits in packed address data except the 128 bits for `aux`.
         uint256 private constant _BITMASK_AUX_COMPLEMENT = (1 << 128) - 1;
-
     
     // Ownership data masks and bit positions.
 
@@ -100,6 +96,16 @@ contract ERC721S is IERC721A {
         bytes32 private constant _TRANSFER_EVENT_SIGNATURE =
             0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef;
 
+        // Selector for `TokenStaked()` error.
+        bytes4 private constant _TOKEN_STAKED_ERROR_SELECTOR = 0x538fd4df;
+
+        // Selector for `WrongContractStakingConfig()` error.
+        bytes4 private constant _WRONG_STAKING_CONFIG_ERROR_SELECTOR = 0x5590a6d1;
+
+        // Selector for `WrongStakingTime()` error.
+        bytes4 private constant _WRONG_STAKING_TIME_ERROR_SELECTOR = 0xac53100b;
+
+        // Extra bitmask for 64 bits data.
         uint256 private constant _BITMASK64 = (1 << 64) - 1;
     
 
@@ -109,12 +115,6 @@ contract ERC721S is IERC721A {
 
     // The next token ID to be minted.
     uint256 private _currentIndex;
-
-    // Token name
-    string private _name;
-
-    // Token symbol
-    string private _symbol;
 
     // Mapping from token ID to ownership details
     // An empty struct value does not necessarily mean the token is unowned.
@@ -141,41 +141,27 @@ contract ERC721S is IERC721A {
     // Mapping from owner to operator approvals
     mapping(address => mapping(address => bool)) private _operatorApprovals;
     
-    // General contract config, decided by the owner, 
-    // to handle different staking strategies.
-    Config private _config;
+    // General contract config, decided by the owner, to handle different 
+    // staking strategies. Note that this variable will be internal because 
+    // its immutable for this contract, but could mutate via inheritance.
+    Config internal _config;
+
 
     // =============================================================
     //                          CONSTRUCTOR
     // =============================================================
 
-    constructor(
-        string memory name_,
-        string memory symbol_,
-        DeploymentConfig memory config_ 
-    ) {
-        // TODO Refactor and add to the contract config struct.
-        _name = name_;
-        _symbol = symbol_;
-
-        // Pack the first `_config` word.
-        assembly {
-            let deployTime := timestamp()
-            let price := and(mload(config_), _BITMASK64)
-            let minStakingTime := and(mload(add(config_, 0x20)), _BITMASK_STAKING_INFO)
-            let mintStakingTime := and(mload(add(config_, 0x40)), _BITMASK_STAKING_INFO)
-            let txStakingTime := and(mload(add(config_, 0x60)), _BITMASK_STAKING_INFO)
-
-            let fstWord := or(deployTime, shl(32, price))
-            fstWord := or(fstWord, shl(96, minStakingTime))
-            fstWord := or(fstWord, shl(128, mintStakingTime))
-            fstWord := or(fstWord, shl(160, txStakingTime))
-            sstore(_config.slot, fstWord)
+    constructor(DeploymentConfig memory config_) {
+        unchecked {
+            _config = Config(
+                uint32(block.timestamp),
+                config_.minStakingTime,
+                config_.automaticStakeTimeOnMint,
+                config_.automaticStakeTimeOnTx,
+                config_.name,
+                config_.symbol
+            );
         }
-
-        // Pack the `baseUri`.
-        _config.baseUri = config_.baseUri;
-
         _currentIndex = _startTokenId();
     }
 
@@ -281,14 +267,14 @@ contract ERC721S is IERC721A {
      * @dev Returns the token collection name.
      */
     function name() public view virtual override returns (string memory) {
-        return _name;
+        return _config.name;
     }
 
     /**
      * @dev Returns the token collection symbol.
      */
     function symbol() public view virtual override returns (string memory) {
-        return _symbol;
+        return _config.symbol;
     }
 
     /**
@@ -375,14 +361,12 @@ contract ERC721S is IERC721A {
      * - The contract must be correctly configured, ie, you can't pack any staking data
      *   if `_config.automaticStakeTimeOnMint == 0`.
      */
-    function _packStakingDataForMint(address owner) private view returns (uint256 result) {
-        // TODO Calc this as a contract constant to reduce some gas.
-        bytes4 _WRONG_STAKING_CONFIG_ERROR_SELECTOR = WrongContractStakingConfig.selector;
+    function _packStakingDataForMint(address owner) internal view returns (uint256 result) {
         assembly {
             let conf := sload(_config.slot)
 
             // If the token shouldn't get staked on tx, revert.
-            let onMintStakingTime := and(shr(128, conf), _BITMASK_STAKING_INFO)
+            let onMintStakingTime := and(shr(_BITPOS_STAKING_TIME_ON_MINT, conf), _BITMASK_STAKING_INFO)
             if iszero(onMintStakingTime) {
                 mstore(0x00, _WRONG_STAKING_CONFIG_ERROR_SELECTOR)
                 revert(0x00, 0x04)
@@ -405,9 +389,7 @@ contract ERC721S is IERC721A {
      *
      * - The token must be unstaked.
      */
-    function _packOwnershipDataForTx(address newOwner, uint256 oldOwnership) private view returns (uint256 result) {
-        // TODO Calc this as a contract constant to reduce some gas.
-        bytes4 _TOKEN_STAKED_ERROR_SELECTOR = TokenStaked.selector;
+    function _packOwnershipDataForTx(address newOwner, uint256 oldOwnership) internal view returns (uint256 result) {
         assembly {
 
             let conf := sload(_config.slot)
@@ -415,7 +397,7 @@ contract ERC721S is IERC721A {
 
             // SET STAKING DURATION IF THE TOKEN SHOULD GET STAKED ON TX.
             { 
-                let stakingDurationOnTx := and(shr(160, conf), _BITMASK_STAKING_INFO)
+                let stakingDurationOnTx := and(shr(_BITPOS_STAKING_TIME_ON_TX, conf), _BITMASK_STAKING_INFO)
                 // If the token should get staked on tx, set that staking data into the result.
                 if not(iszero(stakingDurationOnTx)) {
                     // Calc relative staking start to the deployment time.
@@ -474,19 +456,13 @@ contract ERC721S is IERC721A {
      *
      * - The token must be unstaked.
      */
-    function _updateOwnershipDataForStaking(uint256 oldOwnership, uint32 time) private view returns (uint256 result) {
-        // TODO Calc this as a contract constant to reduce some gas.
-        bytes4 _WRONG_STAKING_TIME_ERROR_SELECTOR = WrongStakingTime.selector;
-
-        // TODO Calc this as a contract constant to reduce some gas.
-        bytes4 _TOKEN_STAKED_ERROR_SELECTOR = TokenStaked.selector;
-
+    function _updateOwnershipDataForStaking(uint256 oldOwnership, uint32 time) internal view returns (uint256 result) {
         assembly {
             let conf := sload(_config.slot)
             let deploymentTime := and(conf, _BITMASK_STAKING_INFO)
 
             // Revert if `time` is less than the min staking time.
-            if lt(time, and(shr(96, conf), _BITMASK_STAKING_INFO)) {
+            if lt(time, and(shr(_BITPOS_MIN_STAKING_TIME, conf), _BITMASK_STAKING_INFO)) {
                 mstore(0x00, _WRONG_STAKING_TIME_ERROR_SELECTOR)
                 revert(0x00, 0x04)
             }
