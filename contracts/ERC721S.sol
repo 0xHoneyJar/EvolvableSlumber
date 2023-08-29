@@ -324,7 +324,7 @@ contract ERC721S is IERC721A {
     /**
      * Returns the packed ownership data of `tokenId`.
      */
-    function _packedOwnershipOf(uint256 tokenId) private view returns (uint256 packed) {
+    function _packedOwnershipOf(uint256 tokenId) internal view returns (uint256 packed) {
         if (_startTokenId() <= tokenId) {
             packed = _packedOwnerships[tokenId];
             // If the data at the starting slot does not exist, start the scan.
@@ -339,7 +339,7 @@ contract ERC721S is IERC721A {
                 //
                 // We can directly compare the packed value.
                 // If the address is zero, packed will be zero.
-                for (;;) {
+                while (true) {
                     unchecked {
                         packed = _packedOwnerships[--tokenId];
                     }
@@ -455,6 +455,7 @@ contract ERC721S is IERC721A {
      * Requirements:
      *
      * - The token must be unstaked.
+     * // TODO You shouldnt be able to stake any token if `_config.minStakingTime == 0`.
      */
     function _updateOwnershipDataForStaking(uint256 oldOwnership, uint32 time) internal view returns (uint256 result) {
         assembly {

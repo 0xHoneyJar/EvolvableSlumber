@@ -1,7 +1,8 @@
 import { expect } from 'chai'
-import { deployMinimalErc721S } from '../scripts/helpers'
+import { checkOwnerships, deployMinimalErc721S } from '../scripts/helpers'
 import { getRandomFundedAccount, randomAddress, sleep } from '../scripts/functionalHelpers'
 import * as S from 'fp-ts/string'
+import { MinimalErc721SImpl } from '../typechain-types'
 
 describe('ERC721S', () => {
 
@@ -135,8 +136,19 @@ describe('ERC721S', () => {
     })
 
     describe('Complex transfering', () => {
-        it.only('shouldn\'t be able to break ownership by transfering inner token', async () => {
+        it('should let tx whole batch', async () => {
             const nft = await deployMinimalErc721S({})
+            const owner = await getRandomFundedAccount()
+            const ownerAlt = randomAddress()
+
+            await nft.mint(owner.address, 3)
+            await nft.connect(owner).transferFrom(owner.address, ownerAlt, 2)
+            await nft.connect(owner).transferFrom(owner.address, ownerAlt, 3)
+            await nft.connect(owner).transferFrom(owner.address, ownerAlt, 1)
+        })
+
+        it('shouldn\'t be able to break ownership by transfering inner token', async () => {
+            const nft = await deployMinimalErc721S({ automaticStakeTimeOnTx: 0 })
             const owner1 = await getRandomFundedAccount()
             const owner2 = await getRandomFundedAccount()
 
@@ -151,45 +163,30 @@ describe('ERC721S', () => {
                 5: owner2.address
             }
 
-            const checkOwnerships = async (expectedOwnership: {[key: number]: string}) => {
-                for (const [id, owner] of Object.entries(expectedOwnership))
-                    expect(await nft.ownerOf(id)).eq(owner)
-
-                const ownerToBalance = Object.entries(expectedOwnership).reduce((acc, [_, owner]) => {
-                    if (owner in acc) acc[owner] += 1
-                    else acc[owner] = 1
-                    return acc
-                }, {} as {[key: string]: number})
-
-                for (const [owner, balance] of Object.entries(ownerToBalance))
-                    expect(await nft.balanceOf(owner).then(n => n.toNumber())).eq(balance)
-            }
-
-            await checkOwnerships(expectedOwnership) 
+            await checkOwnerships(expectedOwnership, nft) 
 
             await nft.connect(owner1).transferFrom(owner1.address, owner2.address, 2)
             expectedOwnership[2] = owner2.address
-            await checkOwnerships(expectedOwnership) 
+            await checkOwnerships(expectedOwnership, nft) 
             await expect(nft.connect(owner1).transferFrom(owner1.address, owner2.address, 2)).reverted
 
             await nft.connect(owner1).transferFrom(owner1.address, owner2.address, 3)
             expectedOwnership[3] = owner2.address
-            await checkOwnerships(expectedOwnership) 
+            await checkOwnerships(expectedOwnership, nft) 
             await expect(nft.connect(owner1).transferFrom(owner1.address, owner2.address, 3)).reverted
 
             await nft.connect(owner2).transferFrom(owner2.address, owner1.address, 5)
             expectedOwnership[5] = owner1.address
-            await checkOwnerships(expectedOwnership)
+            await checkOwnerships(expectedOwnership, nft)
             await expect(nft.connect(owner1).transferFrom(owner1.address, owner2.address, 3)).reverted
 
             await nft.connect(owner1).transferFrom(owner1.address, owner2.address, 1)
             expectedOwnership[1] = owner2.address
-            await checkOwnerships(expectedOwnership)
+            await checkOwnerships(expectedOwnership, nft)
 
-            // FIXME Reverts with a `tokenStaked` error if `balanceOf(owner1) == 1`.
             await nft.connect(owner1).transferFrom(owner1.address, owner2.address, 5)
             expectedOwnership[5] = owner2.address
-            await checkOwnerships(expectedOwnership)
+            await checkOwnerships(expectedOwnership, nft)
         })
     })
 

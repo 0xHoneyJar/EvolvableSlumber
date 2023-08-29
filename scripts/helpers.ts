@@ -3,6 +3,7 @@ import { DeploymentConfigStruct } from '../typechain-types/contracts/ERC721S'
 import { MinimalErc721SImpl } from '../typechain-types'
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray'
 import { getRandomAccount, randExpRange } from './functionalHelpers'
+import { expect } from 'chai'
 
 /**
  *  Randomly mints a token following an exponential distribution, returns
@@ -36,6 +37,25 @@ export const randomAirdrop = async (
     }
 
     return ownersAndOwnedIds
+}
+
+
+
+export const checkOwnerships = async (
+    expectedOwnership: {[key: number]: string},
+    forToken: MinimalErc721SImpl
+) => {
+    for (const [id, owner] of Object.entries(expectedOwnership))
+        expect(await forToken.ownerOf(id)).eq(owner)
+
+    const ownerToBalance = Object.entries(expectedOwnership).reduce((acc, [_, owner]) => {
+        if (owner in acc) acc[owner] += 1
+        else acc[owner] = 1
+        return acc
+    }, {} as {[key: string]: number})
+
+    for (const [owner, balance] of Object.entries(ownerToBalance))
+        expect(await forToken.balanceOf(owner).then(n => n.toNumber())).eq(balance)
 }
 
 
