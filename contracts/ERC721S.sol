@@ -125,7 +125,7 @@ contract ERC721S is IERC721A {
     // - [160..191] `totalStakedTime`
     // - [192..223] `stakingStart`
     // - [223..255] `stakingDuration`
-    mapping(uint256 => uint256) private _packedOwnerships;
+    mapping(uint256 => uint256) internal _packedOwnerships;
 
     // Mapping owner address to address data.
     //

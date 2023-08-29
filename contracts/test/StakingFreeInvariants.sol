@@ -2,7 +2,6 @@
 
 pragma solidity ^0.8.10;
 
-// import '../MinimalErc721SImpl.sol';
 import './ImmutabilityInvariants.sol';
 
 contract StakingFreeInvariants is ImmutableMinimalErc721SImpl {
@@ -15,26 +14,46 @@ contract StakingFreeInvariants is ImmutableMinimalErc721SImpl {
         "TEST"
     );
 
-    uint32 deploymentTime;
+    constructor() ImmutableMinimalErc721SImpl(conf) { }
 
-    constructor() MinimalErc721SImpl(conf) {
-        deploymentTime = uint32(block.timestamp);
-    }
-
-    function echidna_immutable_config() public view returns (bool) {
-        return configIsEqualTo(conf, deploymentTime);
-    }
-    
-    function echidna_revert_on_staking_intent() public view returns (bool) {
+    function echidna_revert_on_mint_staking_intent() public view returns (bool) {
         packStakingDataForMint(msg.sender);
         return true;
     }
 
-    function echidna_ownerships_should_always_be_empty() public pure returns (bool) {
-        // TODO 
-        // _packedOwnershipOf(1);
-        return true;
+    function assert_revert_on_staking_intent(uint256 ownership, uint32 time) public view {
+        updateOwnershipDataForStaking(ownership, time);
+        // If `minStakingTime == 0` that means staking is disabled, so
+        // this code should be unrecheable, ie, the call above should
+        // always revert.
+        assert(false);
     }
+
+    function assert_empty_ownership_on_tx(address newOwner, uint256 tokenId) public view {
+        uint256 ownership = _packedOwnershipOf(tokenId);
+        uint256 newOwnership = packOwnershipDataForTx(newOwner, ownership);
+        assert(address(uint160(newOwnership)) == newOwner);
+        assert(newOwnership >> 160 == 0);
+    }
+
+    function assert_empty_ownerships(uint256 tokenId) public view {
+        if (_exists(tokenId)) {
+            uint256 ownership = _packedOwnershipOf(tokenId);
+            uint256 extraData = ownership >> 160; // Clear the address.
+            assert(extraData == 0);
+        }
+    }
+
+    function assert_exluded_middle_ownership(uint256 tokenId) public view {
+        uint256 ownership = _packedOwnerships[tokenId];
+        // `ownership == 0` or `ownership == someAddress`. No staking data should
+        // be packed in `ownership`.
+        assert(
+            ownership == 0 ||
+            (address(uint160(ownership)) != address(0) && (ownership >> 160 == 0))
+        );
+    }
+
 
 }
 
