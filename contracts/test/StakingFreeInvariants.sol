@@ -16,9 +16,9 @@ contract StakingFreeInvariants is ImmutableMinimalErc721SImpl {
 
     constructor() ImmutableMinimalErc721SImpl(conf) { }
 
-    function echidna_revert_on_mint_staking_intent() public view returns (bool) {
-        packStakingDataForMint(msg.sender);
-        return true;
+    function assert_revert_on_mint_staking_intent(address owner) public view {
+        packStakingDataForMint(owner);
+        assert(false);
     }
 
     function assert_revert_on_staking_intent(uint256 ownership, uint32 time) public view {
@@ -29,19 +29,61 @@ contract StakingFreeInvariants is ImmutableMinimalErc721SImpl {
         assert(false);
     }
 
+    // If staking was never enabled, `totalStakedTime` should always be 0.
+    function assert_empty_total_staked_time_on_tx(address newOwner, uint256 tokenId) public view {
+        uint256 ownership = _packedOwnershipOf(tokenId);
+        TokenOwnership memory newOwnership = _unpackedOwnership(packOwnershipDataForTx(newOwner, ownership));
+        assert(newOwnership.totalStakedTime == 0);
+    }
+
+    // If staking was never enabled, `stakingStart` should always be 0.
+    function assert_empty_staking_start_on_tx(address newOwner, uint256 tokenId) public view {
+        uint256 ownership = _packedOwnershipOf(tokenId);
+        TokenOwnership memory newOwnership = _unpackedOwnership(packOwnershipDataForTx(newOwner, ownership));
+        assert(newOwnership.stakingStart == 0);
+    }
+
+    // If staking was never enabled, `stakingStart` should always be 0.
+    function assert_empty_staking_time_on_tx(address newOwner, uint256 tokenId) public view {
+        uint256 ownership = _packedOwnershipOf(tokenId);
+        TokenOwnership memory newOwnership = _unpackedOwnership(packOwnershipDataForTx(newOwner, ownership));
+        assert(newOwnership.stakingDuration == 0);
+    }
+
+    // If staking was never enabled, all the packed ownership data should always be 0.
     function assert_empty_ownership_on_tx(address newOwner, uint256 tokenId) public view {
         uint256 ownership = _packedOwnershipOf(tokenId);
         uint256 newOwnership = packOwnershipDataForTx(newOwner, ownership);
-        assert(address(uint160(newOwnership)) == newOwner);
-        assert(newOwnership >> 160 == 0);
+        assert(newOwnership >> _BITPOS_TOTAL_STAKED_TIME == 0);
     }
 
+    function assert_right_owner_on_tx_ownership_update(
+        address newOwner, uint256 tokenId
+    ) public view {
+        uint256 ownership = _packedOwnershipOf(tokenId);
+        TokenOwnership memory newOwnership = _unpackedOwnership(packOwnershipDataForTx(newOwner, ownership));
+        assert(newOwnership.owner == newOwner);
+    }
+
+    function assert_right_ownership_on_tx_after_disabling_staking(
+        uint256 oldPackedOwnership,
+        address newOwner
+    ) public view {
+        TokenOwnership memory oldOwnership = _unpackedOwnership(oldPackedOwnership);
+        TokenOwnership memory newOwnership = _unpackedOwnership(
+            packOwnershipDataForTx(newOwner, oldPackedOwnership)
+        );
+        assert(newOwnership.owner == newOwner);
+        assert(newOwnership.stakingDuration == 0);
+        assert(newOwnership.totalStakedTime == oldOwnership.stakingDuration + oldOwnership.totalStakedTime);
+    }
+
+
     function assert_empty_ownerships(uint256 tokenId) public view {
-        if (_exists(tokenId)) {
-            uint256 ownership = _packedOwnershipOf(tokenId);
-            uint256 extraData = ownership >> 160; // Clear the address.
-            assert(extraData == 0);
-        }
+        require(_exists(tokenId));
+        uint256 ownership = _packedOwnershipOf(tokenId);
+        uint256 extraData = ownership >> 160; // Clear the address.
+        assert(extraData == 0);
     }
 
     function assert_exluded_middle_ownership(uint256 tokenId) public view {

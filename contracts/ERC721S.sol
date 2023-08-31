@@ -9,7 +9,7 @@ import './interfaces/IERC721Receiver.sol';
 struct Config {
     // Enough for the next ~80 years.
     uint32 deployTime;
-    // Enough to stake for a lifetime.
+    // Enough to stake for a lifetime. Staking disabled if eq to 0.
     uint32 minStakingTime;
     // Enough to stake for a lifetime.
     uint32 automaticStakeTimeOnMint;
@@ -26,6 +26,13 @@ struct DeploymentConfig {
     uint32 automaticStakeTimeOnTx;
     string name;
     string symbol;
+}
+
+struct TokenOwnership {
+    address owner;
+    uint32 totalStakedTime;
+    uint32 stakingStart;
+    uint32 stakingDuration;
 }
 
 error StakeCallerNotOwnerNorApproved();
@@ -53,60 +60,63 @@ contract ERC721S is IERC721A {
     // =============================================================
 
     // Config bit positions.
-        uint256 private constant _BITPOS_MIN_STAKING_TIME = 32;
-        uint256 private constant _BITPOS_STAKING_TIME_ON_MINT = 64;
-        uint256 private constant _BITPOS_STAKING_TIME_ON_TX = 96;
+        uint256 internal constant _BITPOS_MIN_STAKING_TIME = 32;
+        uint256 internal constant _BITPOS_STAKING_TIME_ON_MINT = 64;
+        uint256 internal constant _BITPOS_STAKING_TIME_ON_TX = 96;
 
     // Address data masks and bit positions.
 
         // Mask of an entry in packed address data.
-        uint256 private constant _BITMASK_ADDRESS_DATA_ENTRY = (1 << 64) - 1;
+        uint256 internal constant _BITMASK_ADDRESS_DATA_ENTRY = (1 << 64) - 1;
 
         // The bit position of `numberMinted` in packed address data.
-        uint256 private constant _BITPOS_NUMBER_MINTED = 64;
+        uint256 internal constant _BITPOS_NUMBER_MINTED = 64;
 
         // The bit position of `aux` in packed address data.
-        uint256 private constant _BITPOS_AUX = 128;
+        uint256 internal constant _BITPOS_AUX = 128;
 
         // Mask of all 256 bits in packed address data except the 128 bits for `aux`.
-        uint256 private constant _BITMASK_AUX_COMPLEMENT = (1 << 128) - 1;
+        uint256 internal constant _BITMASK_AUX_COMPLEMENT = (1 << 128) - 1;
     
     // Ownership data masks and bit positions.
 
         // The mask of the lower 160 bits for addresses.
-        uint256 private constant _BITMASK_ADDRESS = (1 << 160) - 1;
+        uint256 internal constant _BITMASK_ADDRESS = (1 << 160) - 1;
 
         // Mask for staking info entries (they all are of size 32 bits).
-        uint256 private constant _BITMASK_STAKING_INFO = (1 << 32) - 1;
+        uint256 internal constant _BITMASK_STAKING_INFO = (1 << 32) - 1;
 
         // Bit position for the total time staked.
-        uint256 private constant _BITPOS_TOTAL_STAKED_TIME = 160;
+        uint256 internal constant _BITPOS_TOTAL_STAKED_TIME = 160;
 
         // Bit position for the timestamp relative to deploy time
         // at which a token was staked, assuming it was.
-        uint256 private constant _BITPOS_STAKING_START = 192;
+        uint256 internal constant _BITPOS_STAKING_START = 192;
 
         // Bit position for the total duration a token is being staked.
-        uint256 private constant _BITPOS_STAKING_DURATION = 224;
+        uint256 internal constant _BITPOS_STAKING_DURATION = 224;
 
     // Extra constants.
 
         // The `Transfer` event signature is given by:
         // `keccak256(bytes("Transfer(address,address,uint256)"))`.
-        bytes32 private constant _TRANSFER_EVENT_SIGNATURE =
+        bytes32 internal constant _TRANSFER_EVENT_SIGNATURE =
             0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef;
 
         // Selector for `TokenStaked()` error.
-        bytes4 private constant _TOKEN_STAKED_ERROR_SELECTOR = 0x538fd4df;
+        bytes4 internal constant _TOKEN_STAKED_ERROR_SELECTOR = 0x538fd4df;
 
         // Selector for `WrongContractStakingConfig()` error.
-        bytes4 private constant _WRONG_STAKING_CONFIG_ERROR_SELECTOR = 0x5590a6d1;
+        bytes4 internal constant _WRONG_STAKING_CONFIG_ERROR_SELECTOR = 0x5590a6d1;
 
         // Selector for `WrongStakingTime()` error.
-        bytes4 private constant _WRONG_STAKING_TIME_ERROR_SELECTOR = 0xac53100b;
+        bytes4 internal constant _WRONG_STAKING_TIME_ERROR_SELECTOR = 0xac53100b;
+
+        // TODO
+        bytes4 internal constant _STAKING_DISABLED_ERROR_SELECTOR = 0x12345678;
 
         // Extra bitmask for 64 bits data.
-        uint256 private constant _BITMASK64 = (1 << 64) - 1;
+        uint256 internal constant _BITMASK64 = (1 << 64) - 1;
     
 
     // =============================================================
@@ -313,6 +323,10 @@ contract ERC721S is IERC721A {
         return address(uint160(_packedOwnershipOf(tokenId)));
     }
 
+    function _ownershipOf(uint256 tokenId) internal view virtual returns (TokenOwnership memory) {
+        return _unpackedOwnership(_packedOwnershipOf(tokenId)); 
+    }
+    
     /**
      * @dev Returns whether the ownership slot at `index` is initialized.
      * An uninitialized slot does not necessarily mean that the slot has no owner.
@@ -353,6 +367,13 @@ contract ERC721S is IERC721A {
             return packed;
         }
         _revert(OwnerQueryForNonexistentToken.selector);
+    }
+
+    function _unpackedOwnership(uint256 packedOwnership) internal pure returns (TokenOwnership memory ownership) {
+        ownership.owner = address(uint160(packedOwnership)); 
+        ownership.totalStakedTime = uint32(packedOwnership >> _BITPOS_TOTAL_STAKED_TIME);
+        ownership.stakingStart = uint32(packedOwnership >> _BITPOS_STAKING_START);
+        ownership.stakingDuration = uint32(packedOwnership >> _BITPOS_STAKING_DURATION);
     }
 
     /**
@@ -399,7 +420,7 @@ contract ERC721S is IERC721A {
             { 
                 let stakingDurationOnTx := and(shr(_BITPOS_STAKING_TIME_ON_TX, conf), _BITMASK_STAKING_INFO)
                 // If the token should get staked on tx, set that staking data into the result.
-                if not(iszero(stakingDurationOnTx)) {
+                if eq(iszero(stakingDurationOnTx), 0) {
                     // Calc relative staking start to the deployment time.
                     let newRelativeStakingStart := sub(timestamp(), deploymentTime)
                     // Concat the staking start to the total time the token is gonna be staked.
@@ -416,7 +437,7 @@ contract ERC721S is IERC721A {
             {
                 // If the old staking staking duration is 0, that means that the token was 
                 // not staked, or that that it was already unstaked.
-                if not(iszero(oldStakingDuration)) {
+                if eq(iszero(oldStakingDuration), 0) {
                     // Calc the staking start based on the deployment time and the relative staking start.
                     let oldRelativeStakingStart := and(shr(_BITPOS_STAKING_START, oldOwnership), _BITMASK_STAKING_INFO)
                     let oldStakingStart := add(deploymentTime, oldRelativeStakingStart)
@@ -436,10 +457,10 @@ contract ERC721S is IERC721A {
                 // Wont overflow in the next ~136 years.
                 // Will be redudant if the token was already unstaked or never staked, 
                 // in which case, `oldStakingDuraion == 0`.
-                totalTimeStaked := add(
+                totalTimeStaked := add(add(
                     totalTimeStaked,
                     oldStakingDuration
-                )
+                ), 1)
 
                 // Append the new owner and the total time staked to the result.
                 result := or(result, or(
@@ -462,10 +483,17 @@ contract ERC721S is IERC721A {
             let conf := sload(_config.slot)
             let deploymentTime := and(conf, _BITMASK_STAKING_INFO)
 
-            // Revert if `time` is less than the min staking time.
-            if lt(time, and(shr(_BITPOS_MIN_STAKING_TIME, conf), _BITMASK_STAKING_INFO)) {
-                mstore(0x00, _WRONG_STAKING_TIME_ERROR_SELECTOR)
-                revert(0x00, 0x04)
+            // REVERT IF `time` IS LESS THAN THE MIN STAKING TIME OR IF STAKING DISABLED.
+            {
+                let minStakingTime := and(shr(_BITPOS_MIN_STAKING_TIME, conf), _BITMASK_STAKING_INFO)
+                if iszero(minStakingTime) {
+                    mstore(0x00, _STAKING_DISABLED_ERROR_SELECTOR)
+                    revert(0x00, 0x40)
+                }
+                if lt(time, minStakingTime) {
+                    mstore(0x00, _WRONG_STAKING_TIME_ERROR_SELECTOR)
+                    revert(0x00, 0x04)
+                }
             }
 
             let oldStakingDuration := and(shr(_BITPOS_STAKING_DURATION, oldOwnership), _BITMASK_STAKING_INFO)
@@ -474,7 +502,7 @@ contract ERC721S is IERC721A {
             {
                 // If the old staking duration is 0, that means that the token was 
                 // not staked, or that it was already unstaked.
-                if not(iszero(oldStakingDuration)) {
+                if eq(iszero(oldStakingDuration), 0) {
                     // Calc the staking start based on the deployment time and the relative staking start.
                     let oldRelativeStakingStart := and(shr(_BITPOS_STAKING_START, oldOwnership), _BITMASK_STAKING_INFO)
                     let oldStakingStart := add(deploymentTime, oldRelativeStakingStart)

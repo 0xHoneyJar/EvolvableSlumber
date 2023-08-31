@@ -1,8 +1,9 @@
 import { expect } from 'chai'
+import { ethers } from 'hardhat'
 import { checkOwnerships, deployMinimalErc721S } from '../scripts/helpers'
 import { getRandomFundedAccount, randomAddress, sleep } from '../scripts/functionalHelpers'
 import * as S from 'fp-ts/string'
-import { MinimalErc721SImpl } from '../typechain-types'
+import { experimentalAddHardhatNetworkMessageTraceHook } from 'hardhat/config'
 
 describe('ERC721S', () => {
 
@@ -192,6 +193,48 @@ describe('ERC721S', () => {
 
     describe('Approval tests', () => {
          
+    })
+    
+    describe('Pure tests', () => {
+        it('should have right ownership on simple tx', async () => {
+            const nft = await deployMinimalErc721S({ automaticStakeTimeOnTx: 0 })
+            const owner = randomAddress()
+            const altOwner = randomAddress()
+            await nft.mint(owner, 1)
+
+            const owneship = await nft.packOwnershipDataForTx(altOwner, 0)
+            const addr = owneship.and(BigInt(2**160) - 1n)
+            expect(addr.toHexString().toLowerCase()).eq(altOwner)
+        })
+
+
+        it('should have right staking start on simple tx', async () => {
+            const nft = await deployMinimalErc721S({ automaticStakeTimeOnTx: 0 })
+            const owner = randomAddress()
+            const altOwner = randomAddress()
+            await nft.mint(owner, 1)
+
+            const ownership = await nft.packOwnershipDataForTx(altOwner, 0)
+            expect(
+                ownership.and(BigInt(2**160) - 1n).toHexString().toLowerCase()
+            ).eq(altOwner)
+            expect(
+                ownership.shr(192).and(BigInt(2**32) - 1n)
+            ).eq(0)
+        })
+
+        it.only('should have right total staked time after disabling staking', async () => {
+            const nft = await deployMinimalErc721S({ automaticStakeTimeOnTx: 0 })
+            const owner = randomAddress()
+            await nft.mint(owner, 1)
+
+            const oldOwnership = (BigInt(1) << BigInt(224))
+            const ownership = await nft.packOwnershipDataForTx(ethers.constants.AddressZero, oldOwnership)
+            expect(ownership).eq(BigInt(1) << BigInt(160))
+        })
+
+
+
     })
 
 

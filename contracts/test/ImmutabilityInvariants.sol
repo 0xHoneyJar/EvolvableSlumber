@@ -74,6 +74,18 @@ abstract contract ImmutableMinimalErc721SImpl is MinimalErc721SImpl {
     function echidna_start_token_id_constant() public pure returns (bool) {
         return _startTokenId() == 1;
     }
+
+    /* It could actually happen, someone could stake a token in the same block the contract
+       is deployed, so `stakingStart` (relative to `deploymentTime`) could be 0.
+    // `stakingStart == 0` iff `stakingDuration == 0`.
+    // `stakingStart != 0` iff `stakingDuration != 0`.
+    function assert_staking_start_and_staking_duration_bind(uint256 tokenId) public view {
+        TokenOwnership memory ownership = _ownershipOf(tokenId);
+        assert(
+            (ownership.stakingStart != 0 && ownership.stakingDuration != 0) ||
+            (ownership.stakingStart == 0 && ownership.stakingDuration == 0)
+        );
+    }*/
     
 }
 

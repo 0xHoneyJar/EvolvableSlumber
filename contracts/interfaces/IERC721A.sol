@@ -78,16 +78,6 @@ interface IERC721A {
     //                            STRUCTS
     // =============================================================
 
-    struct TokenOwnership {
-        // The address of the owner.
-        address addr;
-        // Stores the start time of ownership with minimal overhead for tokenomics.
-        uint64 startTimestamp;
-        // Whether the token has been burned.
-        bool burned;
-        // Arbitrary data similar to `startTimestamp` that can be set via {_extraData}.
-        uint24 extraData;
-    }
 
     // =============================================================
     //                         TOKEN COUNTERS
