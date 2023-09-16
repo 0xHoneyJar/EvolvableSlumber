@@ -379,8 +379,7 @@ contract ERC721S is IERC721A {
     /**
      * Requirements:
      *
-     * - The contract must be correctly configured, ie, you can't pack any staking data
-     *   if `_config.automaticStakeTimeOnMint == 0`.
+     * - Staking on mint must be enabled (`_config.automaticStakeTimeOnMint > 0`).
      */
     function _packStakingDataForMint(address owner) internal view returns (uint256 result) {
         assembly {
@@ -457,10 +456,10 @@ contract ERC721S is IERC721A {
                 // Wont overflow in the next ~136 years.
                 // Will be redudant if the token was already unstaked or never staked, 
                 // in which case, `oldStakingDuraion == 0`.
-                totalTimeStaked := add(add(
+                totalTimeStaked := add(
                     totalTimeStaked,
                     oldStakingDuration
-                ), 1)
+                )
 
                 // Append the new owner and the total time staked to the result.
                 result := or(result, or(
@@ -476,7 +475,7 @@ contract ERC721S is IERC721A {
      * Requirements:
      *
      * - The token must be unstaked.
-     * // TODO You shouldnt be able to stake any token if `_config.minStakingTime == 0`.
+     * - Staking must be enabled (`_config_minStakingTime  > 0`).
      */
     function _updateOwnershipDataForStaking(uint256 oldOwnership, uint32 time) internal view returns (uint256 result) {
         assembly {

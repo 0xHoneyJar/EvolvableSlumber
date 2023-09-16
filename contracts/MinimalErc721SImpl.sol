@@ -13,7 +13,6 @@ contract MinimalErc721SImpl is ERC721S, Ownable {
     ) ERC721S(config_) { }
 
     function mintAndStake(address to, uint256 quantity) public {
-        require(_config.automaticStakeTimeOnMint > 0);
         _mint(to, quantity);
     }
 

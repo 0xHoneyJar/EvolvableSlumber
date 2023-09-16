@@ -32,21 +32,27 @@ contract StakingFreeInvariants is ImmutableMinimalErc721SImpl {
     // If staking was never enabled, `totalStakedTime` should always be 0.
     function assert_empty_total_staked_time_on_tx(address newOwner, uint256 tokenId) public view {
         uint256 ownership = _packedOwnershipOf(tokenId);
-        TokenOwnership memory newOwnership = _unpackedOwnership(packOwnershipDataForTx(newOwner, ownership));
+        TokenOwnership memory newOwnership = _unpackedOwnership(
+            packOwnershipDataForTx(newOwner, ownership)
+        );
         assert(newOwnership.totalStakedTime == 0);
     }
 
     // If staking was never enabled, `stakingStart` should always be 0.
     function assert_empty_staking_start_on_tx(address newOwner, uint256 tokenId) public view {
         uint256 ownership = _packedOwnershipOf(tokenId);
-        TokenOwnership memory newOwnership = _unpackedOwnership(packOwnershipDataForTx(newOwner, ownership));
+        TokenOwnership memory newOwnership = _unpackedOwnership(
+            packOwnershipDataForTx(newOwner, ownership)
+        );
         assert(newOwnership.stakingStart == 0);
     }
 
     // If staking was never enabled, `stakingStart` should always be 0.
     function assert_empty_staking_time_on_tx(address newOwner, uint256 tokenId) public view {
         uint256 ownership = _packedOwnershipOf(tokenId);
-        TokenOwnership memory newOwnership = _unpackedOwnership(packOwnershipDataForTx(newOwner, ownership));
+        TokenOwnership memory newOwnership = _unpackedOwnership(
+            packOwnershipDataForTx(newOwner, ownership)
+        );
         assert(newOwnership.stakingDuration == 0);
     }
 
@@ -61,7 +67,9 @@ contract StakingFreeInvariants is ImmutableMinimalErc721SImpl {
         address newOwner, uint256 tokenId
     ) public view {
         uint256 ownership = _packedOwnershipOf(tokenId);
-        TokenOwnership memory newOwnership = _unpackedOwnership(packOwnershipDataForTx(newOwner, ownership));
+        TokenOwnership memory newOwnership = _unpackedOwnership(
+            packOwnershipDataForTx(newOwner, ownership)
+        );
         assert(newOwnership.owner == newOwner);
     }
 
@@ -75,9 +83,11 @@ contract StakingFreeInvariants is ImmutableMinimalErc721SImpl {
         );
         assert(newOwnership.owner == newOwner);
         assert(newOwnership.stakingDuration == 0);
-        assert(newOwnership.totalStakedTime == oldOwnership.stakingDuration + oldOwnership.totalStakedTime);
+        assert(
+            newOwnership.totalStakedTime ==
+            oldOwnership.stakingDuration + oldOwnership.totalStakedTime
+        );
     }
-
 
     function assert_empty_ownerships(uint256 tokenId) public view {
         require(_exists(tokenId));
