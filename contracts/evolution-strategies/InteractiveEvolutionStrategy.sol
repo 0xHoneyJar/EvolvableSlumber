@@ -11,7 +11,7 @@ pragma solidity ^0.8.10;
  * @dev This PoC evolution strategy will generally require `n` days staked 
  *      and `n` interactions to achieve level `n//10`. Thus, for example, if
  *      some token was interacted with 49 times, and was staked for 50 days,
- *      then its level will be 4, and 5 after another extra interaction.
+ *      then its level would be 4, and 5 after another extra interaction.
  */
 contract InteractiveEvolutionStrategy is IEvolutionStrategy {
 
