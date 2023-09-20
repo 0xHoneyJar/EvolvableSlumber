@@ -3,8 +3,8 @@
 
 pragma solidity ^0.8.10;
 
-import './interfaces/IERC721A.sol';
-import './interfaces/IERC721Receiver.sol';
+import "./interfaces/IERC721A.sol";
+import "./interfaces/IERC721Receiver.sol";
 
 struct Config {
     // Enough for the next ~80 years.
@@ -184,7 +184,7 @@ contract ERC721S is IERC721A {
      * To change the starting token ID, please override this function.
      */
     function _startTokenId() internal view virtual returns (uint256) {
-        return 0;
+        return 1;
     }
 
     /**
